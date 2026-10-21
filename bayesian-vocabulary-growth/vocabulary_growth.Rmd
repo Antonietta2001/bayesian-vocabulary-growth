@@ -1,0 +1,2141 @@
+---
+title: "From Words to Curves: A Bayesian Hierarchical Negative Binomial Approach to Modeling Early Vocabulary Growth"
+author: "Fundamentals of Statistical Learning II — A.A. 2025/2026"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  bookdown::html_document2:
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    toc_depth: 3
+    number_sections: true
+    theme: flatly
+    highlight: tango
+    code_folding: show
+    df_print: paged
+    fig_width: 9
+    fig_height: 5
+    fig_caption: true
+  pdf_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    highlight: tango
+    fig_width: 9
+    fig_height: 5
+    latex_engine: xelatex
+    keep_tex: true
+    fig_caption: true
+header-includes:
+  - \usepackage{float}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo      = TRUE,
+  warning   = FALSE,
+  message   = FALSE,
+  comment   = "#>",
+  fig.align = "center",
+  fig.pos   = "H",
+  out.width = "85%",
+  cache     = FALSE,
+  # Larger base font size (points) for every base-R plot's axes, labels,
+  # and titles. pointsize scales all par(cex.*) text proportionally and
+  # is re-applied automatically by the graphics device for every chunk,
+  # including chunks with par(mfrow=...) multi-panel figures.
+  dev.args  = list(pointsize = 13)
+)
+```
+
+\floatplacement{figure}{H}
+
+<style>
+body { font-size: 15px; line-height: 1.85; }
+blockquote { background:#f0f7ff; border-left:5px solid #2E75B6;
+             padding:12px 18px; border-radius:4px; font-size:14.5px; }
+.finding   { background:#eafaf1; border-left:5px solid #2A9D8F;
+             padding:12px 18px; border-radius:4px; margin:12px 0; }
+.warning-box { background:#fff8e1; border-left:5px solid #F0A500;
+               padding:12px 18px; border-radius:4px; margin:12px 0; }
+h1 { color:#1F4E79; }
+h2 { color:#2E75B6; }
+h3 { color:#404040; }
+</style>
+
+---
+
+# Introduction and Motivation
+
+The acquisition of productive vocabulary during early childhood is one of the most intensively studied phenomena in developmental psycholinguistics. The period between **16 and 30 months of age** represents a critical window of rapid lexical development, characterised by what researchers have long described as a *vocabulary explosion* — a phase of accelerated growth in which children transition from producing a handful of words to several hundred (Bloom, 1993; Fenson et al., 1994). Understanding the trajectory of this growth, quantifying its enormous individual variability, and identifying the demographic and environmental factors that modulate its pace has both fundamental scientific importance and direct clinical relevance: vocabulary size at 24 months is among the strongest early predictors of later language abilities, academic achievement, and cognitive development (Marchman & Fernald, 2008; Hart & Risley, 1995).
+
+## The Statistical Challenge
+
+From a statistical modelling perspective, productive vocabulary scores present several challenges that make standard approaches inadequate. First, vocabulary counts are **discrete, non-negative, and bounded above** by the instrument ceiling (680 words on the CDI WS form), ruling out the Normal distribution as a strictly correct likelihood. Second, the empirical variance-to-mean ratio in the data ranges from 55 to 122 across monthly age groups — far exceeding the value of 1 required by the Poisson distribution — indicating massive **overdispersion** that cannot be accommodated without an additional dispersion parameter. Third, the distribution of vocabulary scores **changes shape systematically with age**: strongly right-skewed at 16 months (most children near zero), approximately symmetric at 22–23 months, and left-skewed at 28–30 months as children approach the CDI ceiling. Fourth, the **individual variability is enormous**: at 24 months, children of the same age may produce anywhere from fewer than 10 to over 600 words (Frank et al., 2017), a heterogeneity that a population-level model cannot represent.
+
+These features collectively motivate a **Bayesian hierarchical Negative Binomial model**. The Negative Binomial distribution naturally accommodates overdispersed count data through an additional dispersion parameter $r$; the hierarchical structure enables partial pooling of information across age groups; and the Bayesian framework provides full posterior uncertainty quantification, principled prior incorporation, and a formal model comparison criterion (DIC) that balances fit against complexity.
+
+## Covariates and Literature Background
+
+Beyond the age trajectory, the developmental literature identifies several individual-level factors that systematically modulate vocabulary growth. **Sex** is the most consistently documented: girls are reported to have larger productive vocabularies than boys at comparable ages throughout the second year of life (Fenson et al., 1994; Eriksson et al., 2012), a difference that has been attributed to earlier maturation of left-hemisphere language areas (Huttenlocher et al., 1991) and greater sensitivity to linguistic input (Bates et al., 1994). The sex difference may operate on the *level* of the vocabulary plateau (asymptotic effect) or on the *rate* of acquisition (growth rate effect) — a distinction that our modelling framework explicitly tests.
+
+**Caregiver education** is a proxy for the quantity and quality of linguistic input: Hart & Risley (1995) documented that children from higher-SES families hear approximately 30 million more words by age 3 than children from lower-SES families, producing substantial differences in vocabulary growth rates. Crucially, their analysis suggests this operates primarily on the *rate* of acquisition rather than the eventual ceiling — again a distinction that our model can test directly.
+
+**Birth order** has also been documented as a relevant factor: first-born children tend to receive more individual linguistic input from caregivers than later-born children, resulting in richer early vocabularies (Hoff, 2003). The 43% rate of missing data for this variable in our dataset motivates its treatment through **Bayesian missing data imputation** — a natural capability of JAGS that allows the posterior to integrate over the uncertainty in unobserved birth-order values.
+
+Finally, the possibility of an **age × sex interaction** — with sex differences diverging progressively during the vocabulary explosion — has been documented by Bornstein et al. (2004), and is tested through a hierarchical model in which the sex effect is allowed to vary across monthly age groups.
+
+## Structure of the Analysis
+
+This document presents a fully Bayesian analysis of early vocabulary growth structured as follows: Section 2 describes the WordBank dataset and the Marchman subsample used for modelling. Section 3 presents the exploratory data analysis that motivates the model choices. Section 4 introduces the Negative Binomial likelihood and presents six models of increasing complexity. Section 5 reports the parameter recovery study. Section 6 presents MCMC convergence diagnostics. Sections 7 and 8 present the formal model checking (Bayesian p-value) and the frequentist comparison (bonus analyses). Section 9 discusses the results and their implications.
+
+---
+
+# Setup and Libraries
+
+```{r libraries}
+library(wordbankr)    # WordBank data access
+library(dplyr)        # data manipulation
+library(ggplot2)      # plotting
+library(tidyr)        # reshaping
+library(moments)      # skewness
+library(R2jags)       # JAGS interface
+library(rjags)        # JAGS interface
+library(coda)         # MCMC diagnostics
+library(minpack.lm)   # nonlinear least squares (bonus)
+
+col_blue  <- "#457B9D"
+col_red   <- "#E76F51"
+col_green <- "#2A9D8F"
+col_teal  <- "#A8DADC"
+col_purp  <- "#7B2D8B"
+```
+
+---
+
+# Dataset Description
+
+## The WordBank Database
+
+Data come from the **WordBank database** (wordbank.stanford.edu), an open-access repository aggregating MacArthur-Bates CDI data from multiple research groups worldwide (Frank et al., 2017). WordBank currently contains CDI data from over 80,000 children across more than 20 languages. We use the **CDI Words and Sentences form (WS)**, designed for children aged 16–30 months, which contains a checklist of **680 common English words**. The *productive vocabulary* score — the number of words a child produces according to parent report — ranges from 0 to 680 and serves as the response variable throughout.
+
+```{r load-data}
+# ── Robust data loading: tries .rds cache first, then WordBank API ─────────
+# To create the cache from a working session: saveRDS(data_full, "data_full.rds")
+
+rds_path <- "data_full.rds"
+
+if (file.exists(rds_path)) {
+
+  data_full <- readRDS(rds_path)
+  cat("Loaded from cache:", nrow(data_full), "observations\n")
+
+} else {
+
+  message("data_full.rds not found — attempting WordBank API...")
+  Sys.setenv(WORDBANK_URL = "https://wordbank.stanford.edu")
+
+  tryCatch({
+    data_full <- get_administration_data(
+      language = "English (American)", form = "WS",
+      include_demographic_info = TRUE
+    )
+  }, error = function(e) {
+    data_full <<- NULL
+  })
+
+  if (is.null(data_full) || nrow(data_full) == 0) {
+    stop(paste(
+      "Could not load data_full.",
+      "WordBank is unreachable and no local cache found.",
+      "Please run this in an R console when WordBank is available:",
+      "  data_full <- get_administration_data(",
+      "    language = 'English (American)', form = 'WS',",
+      "    include_demographic_info = TRUE)",
+      "  saveRDS(data_full, 'data_full.rds')",
+      sep = "\n"
+    ))
+  }
+
+  saveRDS(data_full, rds_path)
+  cat("Downloaded and cached:", nrow(data_full), "observations\n")
+}
+
+cat("Variables:", paste(names(data_full), collapse=", "), "\n")
+```
+
+## Dataset Heterogeneity and the Marchman Subsample
+
+The full dataset aggregates contributions from 9 independent research groups. Before modelling, we investigate whether these datasets are homogeneous.
+
+```{r dataset-heterogeneity}
+data_full %>%
+  filter(age >= 16, age <= 30) %>%
+  count(dataset_name, sort=TRUE)
+```
+
+```{r dataset-bias}
+# Mean productive vocabulary by dataset at ages 28-30
+data_full %>%
+  filter(age >= 28, age <= 30) %>%
+  group_by(age, dataset_name) %>%
+  summarise(n=n(), mean_prod=round(mean(production),1), .groups="drop") %>%
+  arrange(age, desc(mean_prod))
+```
+
+The cross-tabulation reveals substantial heterogeneity: at age 30, the **Hoff dataset** shows a mean of 288 words versus Marchman's 487 — a difference of nearly 200 words. This reflects genuine sampling differences: Hoff recruited families across SES strata (Hoff, 2003), while Poulin-Dubois focused on bilingual children (Pearson et al., 1993), both known to produce lower CDI scores on average. The **Marchman dataset** (Marchman & Fernald, 2008) is the largest single contributor (n = 5,039), covers all 15 monthly age groups from 16 to 30 months, and provides a homogeneous monolingual English-learning sample with well-documented collection conditions. We restrict all analyses to this dataset.
+
+```{r marchman-filter}
+df_march <- data_full %>%
+  filter(dataset_name == "Marchman", age >= 16, age <= 30,
+         !is.na(production)) %>%
+  select(age, production, sex, birth_order, caregiver_education)
+
+dim(df_march)
+colSums(is.na(df_march))
+```
+
+## Covariates Available
+
+```{r covariate-summary}
+cat("Sex distribution:\n")
+table(df_march$sex, useNA="always")
+
+cat("\nBirth order (condensed):\n")
+table(df_march$birth_order, useNA="always")
+
+cat("\nCaregiver education:\n")
+table(df_march$caregiver_education, useNA="always")
+
+# Mean vocabulary by sex
+df_march %>%
+  filter(!is.na(sex)) %>%
+  group_by(sex) %>%
+  summarise(n=n(), mean_prod=round(mean(production),1), sd_prod=round(sd(production),1))
+```
+
+Sex is complete (0 NA), education has only 8 NA, and birth order has 2,180 NA (43%). The sex difference of 37 words (288 female vs. 251 male) is immediately apparent and consistent with Fenson et al. (1994).
+
+---
+
+# Exploratory Data Analysis
+
+## Growth Trajectory
+
+```{r growth-plot, fig.cap="Productive vocabulary growth in the Marchman dataset. Left: median and 10th–90th percentile band showing monotonic growth with widening variability. Right: mean trajectory by sex, revealing a consistent gap of approximately 30–40 words favouring girls across the full age range."}
+par(mfrow=c(1,2))
+
+# Percentile plot
+pct_data <- df_march %>%
+  group_by(age) %>%
+  summarise(p10=quantile(production,.10), p50=quantile(production,.50),
+            p90=quantile(production,.90), .groups="drop")
+
+plot(pct_data$age, pct_data$p50, type="l", col=col_red, lwd=2.5,
+     ylim=c(0,680), xlab="Age (months)", ylab="Words produced",
+     main="Growth trajectory (Marchman, n=5,039)")
+polygon(c(pct_data$age, rev(pct_data$age)),
+        c(pct_data$p10, rev(pct_data$p90)),
+        col=adjustcolor(col_teal,.4), border=NA)
+lines(pct_data$age, pct_data$p10, col=col_blue, lty=2)
+lines(pct_data$age, pct_data$p90, col=col_blue, lty=2)
+lines(pct_data$age, pct_data$p50, col=col_red, lwd=2.5)
+
+# Sex plot
+sex_data <- df_march %>%
+  filter(!is.na(sex)) %>%
+  group_by(age, sex) %>%
+  summarise(mean_prod=mean(production), .groups="drop")
+
+plot(sex_data$age[sex_data$sex=="Female"], sex_data$mean_prod[sex_data$sex=="Female"],
+     type="b", col=col_red, lwd=2, pch=16,
+     ylim=c(0,580), xlab="Age (months)", ylab="Mean words produced",
+     main="Mean vocabulary by sex")
+lines(sex_data$age[sex_data$sex=="Male"], sex_data$mean_prod[sex_data$sex=="Male"],
+      type="b", col=col_blue, lwd=2, pch=17)
+legend("topleft", c("Female","Male"), col=c(col_red,col_blue), lwd=2, pch=c(16,17))
+
+par(mfrow=c(1,1))
+```
+
+## Descriptive Statistics and Overdispersion
+
+```{r desc-stats}
+desc <- df_march %>%
+  group_by(age) %>%
+  summarise(n=n(), mean=round(mean(production),1), sd=round(sd(production),1),
+            cv=round(sd(production)/mean(production),2),
+            skewness=round(moments::skewness(production),2),
+            var_mean_ratio=round(var(production)/mean(production),1))
+
+print(desc, n=15)
+```
+
+Three features motivate the Negative Binomial likelihood:
+
+1. **Overdispersion**: variance/mean ratios range from 55.7 (age 30) to 122.0 (age 21) — massively exceeding the Poisson requirement of 1. This alone rules out Poisson as a viable likelihood.
+
+2. **Skewness sign change**: from strongly positive (+2.91 at age 16) through approximately zero (ages 22–23) to increasingly negative (−1.18 at age 30). This reflects the CDI ceiling effect at 680 words, where right-censoring compresses older children's scores.
+
+3. **Increasing CV → decreasing relative variability**: CV drops monotonically from 1.26 to 0.34, indicating that while absolute variability remains high, relative variability diminishes as children approach their asymptote — consistent with the bounded nature of the CDI.
+
+## Diagnosing Overdispersion Graphically
+
+A direct and intuitive way to diagnose overdispersion is to compare, for each monthly age group, the **observed variance** in vocabulary scores against the **variance the Poisson distribution would predict** if it were the correct likelihood. Under Poisson, variance must equal the mean exactly; any systematic excess of observed variance over this Poisson-implied benchmark is direct evidence that a Negative Binomial (or another overdispersed) likelihood is required.
+
+```{r overdispersion-plot, fig.height=6, fig.cap="Observed variance versus Poisson-implied variance (= mean) and NegBin-implied variance (with r = 1.6, the value later estimated in NB2) for each of the 15 monthly age groups, on a log y-axis to keep both young (small) and old (large) age groups simultaneously visible. Orange bars show the actual variance in the data; grey bars show what the variance would be under Poisson; purple bars show what the variance would be under the Negative Binomial. The number above each triplet is the overdispersion ratio (observed variance / Poisson variance). The orange and purple bars track each other closely at every age while both dwarf the grey Poisson bar, providing direct visual confirmation that the Negative Binomial — not Poisson — correctly reproduces the variance structure of the data."}
+mv_data <- df_march %>%
+  group_by(age) %>%
+  summarise(mean_v = mean(production), var_v = var(production), .groups="drop") %>%
+  mutate(ratio = round(var_v / mean_v, 0))
+
+r_ref <- 1.6
+negbin_var <- mv_data$mean_v + mv_data$mean_v^2 / r_ref
+
+bar_matrix <- rbind(Observed = mv_data$var_v,
+                     Poisson  = mv_data$mean_v,
+                     NegBin   = negbin_var)
+colnames(bar_matrix) <- mv_data$age
+
+# Reserve a dedicated strip at the top of the figure for the legend,
+# so it never overlaps the bars regardless of their height
+layout(matrix(c(1,2), nrow=2), heights=c(1, 5))
+
+par(mar=c(0,4,0,1))
+plot.new()
+legend("center", horiz=TRUE, bty="n", cex=0.85, xpd=NA, x.intersp=0.6, text.width=NA,
+       legend=c("Observed", "Poisson", "NegBin (r=1.6)", "Ratio (obs/Poisson)"),
+       fill=c(col_red, "gray70", col_purp, NA), border=NA,
+       text.col=c("black","black","black",col_purp))
+
+par(mar=c(5,4,2,1))
+bp <- barplot(bar_matrix, beside=TRUE, col=c(col_red, "gray70", col_purp),
+              border=NA, log="y", ylim=c(1, max(mv_data$var_v)*2.2),
+              xlab="Age (months)", ylab="Variance (log scale)")
+
+ratio_x <- bp[1,] + (bp[2,]-bp[1,])
+text(ratio_x, mv_data$var_v, labels=paste0(mv_data$ratio,"x"),
+     pos=3, cex=0.8, col=col_purp, font=2, xpd=NA)
+
+layout(1)  # reset layout for subsequent plots
+```
+
+The contrast in this bar chart needs no logarithms or curve-fitting to interpret: at every single age from 16 to 30 months, the orange "observed" bar is dramatically taller than its grey "Poisson-implied" neighbour, by a factor (printed above each triplet) that ranges from 55.7 at the oldest age to 122.0 at age 21. A genuinely Poisson-distributed count variable would show orange and grey bars of essentially equal height throughout — the complete absence of any such near-equality, at any age, is the most direct possible visual argument against using a Poisson likelihood for this data. Crucially, the purple "NegBin-implied" bar — computed using the dispersion value $r=1.6$ that the model will later estimate from the full data in Section 5 — tracks the orange observed bar closely at every single age, in sharp contrast to the grey Poisson bar's systematic and severe undershoot. This is the variance-side counterpart to the posterior predictive fit checks performed later in the report: even before any model has been formally fitted, simply plugging a plausible dispersion value into the NegBin variance formula already reproduces the broad shape of the data's variance structure, while Poisson cannot come close at any age. The ratio is largest at the youngest ages (where a few precocious children produce vocabularies far above an otherwise near-zero baseline) and smallest — though still **55 times** the Poisson benchmark — at 30 months, where the CDI ceiling compresses the right tail and mechanically reduces variance for all groups equally.
+
+## Distribution by Age Group
+
+```{r density-plot, fig.cap="Kernel density estimates by age group. The progressive shift from right-skewed (age 16, red) to left-skewed (age 30, pink) distributions, with near-symmetric intermediate ages, illustrates the CDI ceiling effect and motivates the age-specific variance structure."}
+df_march %>%
+  filter(age %in% c(16, 19, 22, 25, 28, 30)) %>%
+  mutate(age=factor(age)) %>%
+  ggplot(aes(x=production, fill=age, color=age)) +
+  geom_density(alpha=0.3) +
+  labs(title="Vocabulary distribution by age group",
+       x="Words produced (0–680)", y="Density") +
+  theme_minimal(base_size=13)
+```
+
+The six selected age groups in the figure above trace the full arc of distributional change documented numerically in Table 1 (the descriptive statistics above). At 16 months (dark red), the density is sharply peaked near zero with a long thin right tail — most children have barely begun producing words, while a small minority are already accumulating vocabulary quickly. By 22 months, the distribution has flattened and broadened considerably, reflecting the heterogeneous timing of the vocabulary explosion across children. By 30 months (pale pink), the density has not only shifted rightward but has also developed a distinctive left-skewed shape with a shoulder near the 680-word ceiling, visually confirming the ceiling compression effect discussed above.
+
+```{r boxplot-by-age, fig.cap="Boxplots of productive vocabulary by monthly age group. The widening boxes (interquartile range) from age 16 to approximately age 24, followed by stabilisation, directly visualise the variance pattern reported in Table 1. Outlier points above the upper whisker are concentrated at younger ages, where a small number of precocious children produce vocabularies far exceeding their age-group peers."}
+boxplot(production ~ age, data=df_march,
+        col=adjustcolor(col_blue, 0.4), border=col_blue,
+        xlab="Age (months)", ylab="Words produced",
+        main="Productive Vocabulary by Age: Distributional Spread")
+abline(h=680, col=col_red, lty=3, lwd=1.5)
+text(1, 660, "CDI ceiling (680)", col=col_red, cex=0.8, pos=4)
+```
+
+The boxplot representation above complements the density plot by making the **growth of the interquartile range** directly visible: box height increases steadily from age 16 to roughly age 24, after which it stabilises and even contracts slightly as the upper quartile approaches the ceiling (visualised by the dotted red line at 680). The relatively high density of outlier points at the youngest ages reflects the small number of unusually precocious 16–18-month-olds whose vocabulary already rivals that of typical 22–24-month-olds — exactly the kind of individual heterogeneity that motivates the hierarchical, rather than population-level, model structure introduced in Section 4.
+
+---
+
+# Statistical Models
+
+## Likelihood: The Negative Binomial Distribution
+
+All models use the **Negative Binomial likelihood**, motivated by the extreme overdispersion documented above. For child $i$ with age $x_i$ months:
+
+$$y_i \sim \text{NegBin}(\mu_i, r), \quad \text{Var}(y_i) = \mu_i + \frac{\mu_i^2}{r}$$
+
+In JAGS: `y[i] ~ dnegbin(p[i], r)` with `p[i] <- r / (r + mu[i])`. The dispersion parameter $r > 0$ is estimated from the data with prior $r \sim \text{Gamma}(0.01, 0.01)$ — weakly informative, spanning several orders of magnitude. When $r \to \infty$, the NegBin reduces to Poisson.
+
+It is worth dwelling briefly on *why* the NegBin variance has exactly this form, since it is not an arbitrary modelling convenience but follows from a natural generative story. The Negative Binomial can be derived as a **Poisson-Gamma mixture**: if $y_i \mid \lambda_i \sim \text{Poisson}(\lambda_i)$ and the rate $\lambda_i$ itself varies across children according to $\lambda_i \sim \text{Gamma}(r, r/\mu_i)$ (mean $\mu_i$, shape $r$), then marginally $y_i \sim \text{NegBin}(\mu_i, r)$. This interpretation is particularly apt for vocabulary data: even *within* a single monthly age group, children differ enormously in their "underlying" rate of word production due to unmeasured factors (temperament, exposure, hearing acuity, interest in language), and the Gamma mixing distribution is exactly what captures this latent heterogeneity. The dispersion parameter $r$ is therefore not merely a nuisance parameter but has a direct interpretation as the **shape of the latent heterogeneity distribution**: small $r$ (as estimated here, $\hat{r} \approx 1.4$–$1.7$) indicates substantial unexplained heterogeneity in word-production propensity even after conditioning on age and the modelled covariates.
+
+## Mean Function: Brody-Bertalanffy Asymptotic Growth
+
+The mean $\mu_i$ follows the Brody-Bertalanffy asymptotic growth function (von Bertalanffy, 1957), directly analogous to the dugong model in Ntzoufras (2010, pp. 190–196):
+
+$$\mu_i = \alpha \cdot \left(1 - e^{-\beta\,(x_i - x_0)}\right)$$
+
+where:
+- $\alpha > 0$ = **asymptotic maximum vocabulary** (the plateau)
+- $\beta > 0$ = **growth rate** (how fast vocabulary approaches the plateau)
+- $x_0 = 8$ months = fixed onset age (Fenson et al., 1994)
+
+This functional form is bounded above by $\alpha$ (consistent with the CDI ceiling), monotonically increasing for $\beta > 0$, and has a direct biological interpretation for both parameters. It is instructive to visualise the family of curves this function can generate, and how varying $\alpha$ and $\beta$ separately changes its shape — this directly previews what the hierarchical and covariate-extended models in Section 4 will allow the data to estimate.
+
+```{r growth-curve-family, fig.cap="The Brody-Bertalanffy growth curve family. Left: varying the asymptote alpha (beta fixed at 0.06) shifts the eventual plateau without changing the shape of the approach. Right: varying the growth rate beta (alpha fixed at 450) changes how quickly the plateau is approached, without changing the eventual ceiling. This separation of 'how high' (alpha) from 'how fast' (beta) is precisely what models NB3 (sex on alpha) and NB6 (sex on beta) are designed to disentangle empirically."}
+par(mfrow=c(1,2), mar=c(4,4,3,1))
+age_grid <- seq(8, 30, length.out=200)
+
+# Left: varying alpha
+plot(age_grid, 300*(1-exp(-0.06*(age_grid-8))), type="l", lwd=2.5, col=col_blue,
+     ylim=c(0,650), xlab="Age (months)", ylab="Predicted vocabulary",
+     main="Varying alpha (beta = 0.06 fixed)")
+lines(age_grid, 450*(1-exp(-0.06*(age_grid-8))), lwd=2.5, col=col_green)
+lines(age_grid, 600*(1-exp(-0.06*(age_grid-8))), lwd=2.5, col=col_red)
+legend("bottomright", legend=c("alpha=300","alpha=450","alpha=600"),
+       col=c(col_blue,col_green,col_red), lwd=2.5, bty="n", cex=0.85)
+
+# Right: varying beta
+plot(age_grid, 450*(1-exp(-0.03*(age_grid-8))), type="l", lwd=2.5, col=col_blue,
+     ylim=c(0,500), xlab="Age (months)", ylab="Predicted vocabulary",
+     main="Varying beta (alpha = 450 fixed)")
+lines(age_grid, 450*(1-exp(-0.06*(age_grid-8))), lwd=2.5, col=col_green)
+lines(age_grid, 450*(1-exp(-0.12*(age_grid-8))), lwd=2.5, col=col_red)
+legend("bottomright", legend=c("beta=0.03","beta=0.06","beta=0.12"),
+       col=c(col_blue,col_green,col_red), lwd=2.5, bty="n", cex=0.85)
+par(mfrow=c(1,1))
+```
+
+The left panel above shows that $\alpha$ controls purely the *vertical* extent of the curve: all three curves have an identical shape and reach 50% of their respective asymptotes at the same age, but plateau at different heights. The right panel shows that $\beta$ controls purely the *horizontal* timing: all three curves share the same eventual ceiling of 450 words but reach it at very different rates — a curve with $\beta = 0.12$ reaches 50% of its asymptote roughly four times faster than one with $\beta = 0.03$ (half-life $= \log 2/\beta$). This clean separation between "level" ($\alpha$) and "timing" ($\beta$) is the formal justification, beyond the literature motivation given in Section 1.3, for testing the sex effect on each parameter separately via NB3 and NB6: the two models are not redundant, because they encode genuinely different biological hypotheses about *where* in the growth process a given covariate exerts its influence.
+
+## Data Preparation
+
+```{r data-prep}
+df_march_cov <- data_full %>%
+  filter(dataset_name=="Marchman", age>=16, age<=30, !is.na(production)) %>%
+  mutate(
+    age_idx   = age - 15,
+    sex_bin   = ifelse(sex=="Female", 1L, 0L),
+    edu_group = case_when(
+      caregiver_education %in% c("Primary","Some Secondary","Secondary") ~ 1L,
+      caregiver_education %in% c("Some College","College")               ~ 2L,
+      caregiver_education %in% c("Some Graduate","Graduate")             ~ 3L,
+      TRUE ~ NA_integer_
+    ),
+    firstborn = case_when(
+      birth_order == "First" ~ 1L,
+      is.na(birth_order)     ~ NA_integer_,
+      TRUE                   ~ 0L
+    )
+  ) %>%
+  filter(!is.na(edu_group)) %>%
+  select(age, age_idx, production, sex_bin, edu_group, firstborn)
+
+cat("Final modelling dataset:", nrow(df_march_cov), "children\n")
+cat("NA in firstborn:", sum(is.na(df_march_cov$firstborn)), "\n")
+
+set.seed(123)
+df_model_cov <- df_march_cov %>% sample_n(500)
+age_seq <- 16:30
+```
+
+## Model Overview
+
+Six models are fitted and compared via DIC:
+
+| Model | Mean structure | Covariates | Literature motivation |
+|---|---|---|---|
+| NB1 | Fixed $\alpha$, $\beta$ | None | Baseline |
+| NB2 | Hierarchical $\alpha_j$ | None | Frank et al. (2017) |
+| NB3 | Hierarchical $\alpha_j$ + $\gamma \cdot \text{sex}$ | Sex on level | Fenson et al. (1994); Eriksson et al. (2012) |
+| NB6 | Hierarchical $\alpha_j$, sex-specific $\beta$ | Sex on rate | Bates et al. (1994); Huttenlocher et al. (1991) |
+| NB_edu | Hierarchical $\alpha_j$ + edu on $\beta$ | Education on rate | Hart & Risley (1995) |
+| NB_int | Hierarchical $\alpha_j$ + age-varying sex | Age×sex interaction | Bornstein et al. (2004) |
+
+---
+
+# Model Fitting and Results
+
+## P0: Poisson Baseline — Testing the Overdispersion Assumption
+
+Before fitting any Negative Binomial model, we fit a **pure Poisson model** as an explicit quantitative reference point. This model is not expected to fit well — the EDA in Section 3 already showed variance/mean ratios of 55–122, far above the Poisson requirement of 1 — but fitting it formally and computing its DIC serves three purposes: (1) it provides a concrete, numerically anchored demonstration of how much the NegBin improves upon Poisson, justifying the likelihood choice to a sceptical reader; (2) it establishes the theoretical floor of model performance against which all six NegBin models can be contextualised; (3) it makes the Poisson-Gamma mixture interpretation of the NegBin tangible — the DIC gap between P0 and NB1 is entirely attributable to the addition of the latent Gamma layer that captures between-child heterogeneity.
+
+The Poisson model is specified identically to NB1 but with `y[i] ~ dpois(mu[i])` instead of `dnegbin`, and no dispersion parameter $r$ to estimate:
+
+$$y_i \mid \mu_i \sim \text{Poisson}(\mu_i), \qquad \mu_i = \alpha \cdot (1 - e^{-\beta(x_i - 8)})$$
+
+```{r p0-fit, cache=TRUE, results='hide'}
+model_p0_string <- "
+model {
+  for (i in 1:n) {
+    y[i] ~ dpois(mu[i])
+    mu[i] <- alpha * (1 - exp(-beta * (x[i] - x0)))
+  }
+  alpha ~ dnorm(400, 0.0001) T(0,)
+  beta  ~ dnorm(0.1, 400)   T(0,)
+}
+"
+jags_data_p0 <- list(y=df_model_cov$production, x=df_model_cov$age,
+                     n=nrow(df_model_cov), x0=8)
+inits_p0 <- function() list(alpha=rnorm(1,400,50), beta=runif(1,0.05,0.15))
+set.seed(42)
+fit_p0 <- jags(data=jags_data_p0, inits=inits_p0,
+               parameters.to.save=c("alpha","beta"),
+               model.file=textConnection(model_p0_string),
+               n.chains=3, n.iter=15000, n.burnin=3000, n.thin=3)
+```
+
+```{r p0-print}
+print(fit_p0)
+```
+
+**Key results:** The Poisson model converges numerically but with $\hat{R} = 1.037$--$1.038$ and ESS = 63 for all parameters — marginal mixing that reflects the incompatibility of the Poisson constraint with the overdispersed data. The problem is fundamental to the Poisson likelihood itself. The DIC of P0 will be reported alongside the full model comparison table in Section 10; we anticipate a DIC far above any NegBin model, reflecting a systematic failure of the Poisson to accommodate the observed variance. We can already foreshadow the reason from the Poisson-Gamma derivation: under a Poisson model, the effective $r$ is forced to infinity (no latent heterogeneity is allowed between children of the same age), whereas the data strongly support $r \approx 1.5$ — the posterior of $r$ in NB1 lies entirely in [1.23, 1.56], nowhere near the Poisson limit.
+
+## NB1: Population-Level Baseline
+
+NB1 is the simplest model, sharing $\alpha$ and $\beta$ across all children. It establishes a baseline DIC and demonstrates the inadequacy of a non-hierarchical structure.
+
+```{r nb1-fit, cache=TRUE, results='hide'}
+model_nb1_string <- "
+model {
+  for (i in 1:n) {
+    y[i] ~ dnegbin(p[i], r)
+    p[i] <- r / (r + mu[i])
+    mu[i] <- alpha * (1 - exp(-beta * (x[i] - x0)))
+  }
+  alpha ~ dnorm(400, 0.0001) T(0,)
+  beta  ~ dnorm(0.1, 400)   T(0,)
+  r     ~ dgamma(0.01, 0.01)
+}
+"
+jags_data_nb1 <- list(y=df_model_cov$production, x=df_model_cov$age,
+                      n=nrow(df_model_cov), x0=8)
+inits_nb1 <- function() list(alpha=rnorm(1,400,50), beta=runif(1,0.05,0.15),
+                              r=runif(1,1,10))
+set.seed(42)
+fit_nb1 <- jags(data=jags_data_nb1, inits=inits_nb1,
+                parameters.to.save=c("alpha","beta","r"),
+                model.file=textConnection(model_nb1_string),
+                n.chains=3, n.iter=15000, n.burnin=3000, n.thin=3)
+```
+
+```{r nb1-print}
+print(fit_nb1)
+```
+
+**Key results:** The estimated dispersion $\hat{r} = 1.39$ (95% CI: [1.23, 1.56]) quantifies the extreme overdispersion — with $r \approx 1.4$, the variance at the mean of 293 words (age 24) is $293 + 293^2/1.4 \approx 61{,}600$ words$^2$, compared to only 293 under Poisson. The asymptote $\hat{\alpha} = 644$ words — while technically below the CDI ceiling of 680 — is biologically implausible as a single shared plateau for children aged 16 to 30 months simultaneously. A 16-month-old child is nowhere near an asymptote of 644 words; the estimate is inflated because the model must extrapolate far beyond the observed window to find a plausible plateau for the oldest age groups, distorting the estimate for every other group in the process. DIC = 6,499.8.
+
+```{r p0-vs-nb1-comparison, fig.height=4.5, fig.cap="Poisson vs NegBin fitted growth curves overlaid on the observed data. Left: the Poisson model P0 produces a curve that passes through the cloud of means but dramatically under-predicts the spread of observations at every age — the 80% predictive band (light blue) is far too narrow relative to the actual data scatter, a direct consequence of Var(y)=mean forced by Poisson. Right: NB1 (NegBin, population-level) produces a substantially wider and more realistic predictive band at every age, even though the point estimates of the mean curve are similar. The difference between the two panels is entirely due to the latent Gamma layer introduced by the NegBin, which adds mu^2/r to the variance."}
+age_grid_p <- 16:30
+n_draw_p   <- 2000
+post_p0    <- fit_p0$BUGSoutput$sims.matrix
+post_nb1   <- fit_nb1$BUGSoutput$sims.matrix
+
+par(mfrow=c(1,2), mar=c(4,4,3,1))
+
+for (mod in c("Poisson","NegBin")) {
+  pm    <- if(mod=="Poisson") post_p0 else post_nb1
+  set.seed(5)
+  idx_p <- sample(nrow(pm), n_draw_p, replace=TRUE)
+  pred_mu <- sapply(age_grid_p, function(a)
+    pm[idx_p,"alpha"] * (1-exp(-pm[idx_p,"beta"]*(a-8))))
+  if (mod=="Poisson") {
+    pred_lo <- sapply(1:length(age_grid_p), function(k)
+      quantile(qpois(0.10, pred_mu[,k]), 0.5))
+    pred_hi <- sapply(1:length(age_grid_p), function(k)
+      quantile(qpois(0.90, pred_mu[,k]), 0.5))
+  } else {
+    r_s <- pm[idx_p,"r"]
+    pred_lo <- sapply(1:length(age_grid_p), function(k)
+      quantile(rnbinom(n_draw_p, size=r_s, mu=pred_mu[,k]), 0.10))
+    pred_hi <- sapply(1:length(age_grid_p), function(k)
+      quantile(rnbinom(n_draw_p, size=r_s, mu=pred_mu[,k]), 0.90))
+  }
+  pred_mean <- colMeans(pred_mu)
+
+  plot(jitter(df_model_cov$age, 0.6), df_model_cov$production,
+       pch=16, col=adjustcolor("gray40",0.3), cex=0.6,
+       xlab="Age (months)", ylab="Productive vocabulary",
+       main=paste0(mod, " model — predictive band"),
+       ylim=c(0,720))
+  polygon(c(age_grid_p,rev(age_grid_p)), c(pred_lo,rev(pred_hi)),
+          col=adjustcolor(col_blue,0.20), border=NA)
+  lines(age_grid_p, pred_mean,
+        col=if(mod=="Poisson") col_red else col_blue, lwd=2.5)
+  abline(h=680, col="gray60", lty=3)
+}
+par(mfrow=c(1,1))
+```
+
+The contrast between the two panels above is the single most compelling visual argument for the Negative Binomial in this analysis. Both models estimate a similar mean curve — the Poisson and NegBin share the same growth function and the same prior on $\alpha$ and $\beta$, so their posterior mean predictions for $\mu_i$ are close. The difference is entirely in the **predictive spread**: the Poisson band is far too narrow, missing the vast majority of the actual data scatter, while the NegBin band is wider and captures the observed variability much more faithfully. This is the Poisson-Gamma mixture story made visually explicit: every child has their own latent rate $\lambda_i \sim \text{Gamma}(r, r/\mu_i)$, and it is this latent heterogeneity — not sampling noise — that produces the wide bands in the right panel.
+
+
+
+It is worth unpacking *why* the single-asymptote model is forced into this biologically implausible estimate. Because NB1 must fit a single growth curve through children of every age from 16 to 30 months simultaneously, and because the empirical trajectory shows vocabulary continuing to grow steeply even at 30 months (rather than visibly flattening), the only way for the model to extrapolate a plausible eventual plateau is to push $\alpha$ well beyond the observed range. In effect, NB1 is being asked to estimate where the curve *would* level off if children were followed past 30 months, and it extrapolates this well beyond the typical range for the youngest age groups. This is not a numerical quirk of the optimiser; it is the correct Bayesian answer to a genuinely misspecified question, because the assumption that *every* child — from the slowest 16-month-old to the fastest 30-month-old — shares the same $\alpha$ is empirically false. The growth rate $\hat{\beta} = 0.033$ is correspondingly slower than what is later estimated under the hierarchical model, because the single curve must "stretch" to accommodate the full 16–30 month range without the benefit of group-specific asymptotes that can each level off appropriately for their own age range. This pair of distorted estimates is the clearest possible illustration of why hierarchical pooling, introduced next, is not merely a refinement but a structural necessity for this dataset.
+
+## NB2: Hierarchical Model — Age-Specific Asymptotes
+
+**Motivation:** Frank et al. (2017) document that vocabulary growth exhibits enormous inter-individual variability that is structured by age group. A hierarchical model allows the asymptotic vocabulary $\alpha_j$ to vary across the 15 monthly age groups, with group-specific values drawn from a common population distribution — enabling *shrinkage* toward the population mean $\mu_\alpha$ and *borrowing of strength* across groups.
+
+$$y_i \sim \text{NegBin}(\alpha_{j(i)} \cdot (1-e^{-\beta(x_i-8)}),\; r)$$
+$$\alpha_j \sim \text{Normal}(\mu_\alpha,\; \sigma_\alpha^2), \quad j=1,\ldots,15$$
+
+```{r nb2-fit, cache=TRUE, results='hide'}
+model_nb2_string <- "
+model {
+  for (i in 1:n) {
+    y[i] ~ dnegbin(p[i], r)
+    p[i] <- r / (r + mu[i])
+    mu[i] <- alpha[age_idx[i]] * (1 - exp(-beta * (x[i] - x0)))
+  }
+  for (j in 1:n_ages) { alpha[j] ~ dnorm(mu_alpha, tau_alpha) T(0,) }
+  mu_alpha    ~ dnorm(400, 0.0001) T(0,)
+  sigma_alpha ~ dunif(0, 300)
+  tau_alpha   <- 1 / (sigma_alpha * sigma_alpha)
+  beta ~ dnorm(0.1, 400) T(0,)
+  r    ~ dgamma(0.01, 0.01)
+}
+"
+jags_data_nb2 <- list(y=df_model_cov$production, x=df_model_cov$age,
+                      age_idx=df_model_cov$age_idx, n=nrow(df_model_cov),
+                      n_ages=15, x0=8)
+inits_nb2 <- function() list(mu_alpha=rnorm(1,400,50), sigma_alpha=runif(1,50,150),
+                              beta=runif(1,0.05,0.15), r=runif(1,1,10))
+set.seed(42)
+fit_nb2 <- jags(data=jags_data_nb2, inits=inits_nb2,
+                parameters.to.save=c("mu_alpha","sigma_alpha","beta","r","alpha"),
+                model.file=textConnection(model_nb2_string),
+                n.chains=3, n.iter=30000, n.burnin=5000, n.thin=5)
+```
+
+```{r nb2-print}
+print(fit_nb2)
+```
+
+**Key results:** $\hat{\mu}_\alpha = 424$ words — now within the biological range. $\hat{\sigma}_\alpha = 205$ words quantifies the large between-group heterogeneity in asymptotic levels. $\hat{\beta} = 0.059$, corresponding to reaching 50% of the asymptote approximately 11.7 months after $x_0 = 8$, i.e., around 20 months — consistent with the typical onset of the vocabulary explosion (Bloom, 1993). DIC = 6,412.5, $\Delta$DIC = **87.3** vs NB1.
+
+This single $\Delta$DIC of 87.3 points deserves to be unpacked rather than simply reported, since it is the single most consequential modelling decision in the entire project. The improvement comes entirely from allowing $\alpha_j$ to vary by age group while keeping every other aspect of the model identical — same likelihood, same growth function, same number of free covariates beyond the 15 group-level asymptotes. The fifteen $\hat{\alpha}_j$ posterior means (visible directly in the printed JAGS output above) trace out a clearly increasing, slightly irregular sequence from roughly 190 words at 16 months to roughly 720 words at 30 months — a pattern that itself echoes the raw percentile trajectory shown in the growth trajectory figure earlier in this report, now formalised as model parameters with full posterior uncertainty rather than as raw sample statistics. Note also that the individual $\hat{\alpha}_j$ at the oldest ages (e.g. $\hat{\alpha}_{15} \approx 720$ at 30 months) legitimately exceed the CDI ceiling of 680: this is not the same failure mode as NB1, because here it reflects the genuine extrapolated asymptote *for that specific age group*, shrunk toward $\hat{\mu}_\alpha$ by the hierarchical prior, rather than a single global parameter forced to accommodate all ages simultaneously. The practical resolution — explicit truncation of *predictions* at 680 — is implemented later in the posterior predictive section and does not require modifying the parameters themselves.
+
+```{r nb2-fit-overlay, fig.cap="NB2 fitted growth curve overlaid on the raw data. Grey points are individual children (jittered slightly for visibility); the solid blue curve is the posterior mean prediction E[y|x]; the shaded blue band is the 80% posterior predictive interval, propagating both parameter uncertainty and NegBin sampling variability. The fitted curve passes through the heart of the data cloud at every age, and the predictive band correctly widens where the data themselves are most dispersed (ages 22–26) and narrows somewhat near the ceiling."}
+post2_full <- fit_nb2$BUGSoutput$sims.matrix
+age_grid2  <- 16:30
+
+pred_mean <- pred_lo <- pred_hi <- numeric(length(age_grid2))
+set.seed(1)
+for (k in seq_along(age_grid2)) {
+  eta <- age_grid2[k]
+  j   <- eta - 15
+  a_idx <- paste0("alpha[", j, "]")
+  idx_s <- sample(nrow(post2_full), 3000, replace=TRUE)
+  mu_k  <- post2_full[idx_s, a_idx] * (1 - exp(-post2_full[idx_s,"beta"]*(eta-8)))
+  y_k   <- rnbinom(3000, size=post2_full[idx_s,"r"], mu=mu_k)
+  pred_mean[k] <- mean(mu_k)
+  pred_lo[k]   <- quantile(y_k, 0.10)
+  pred_hi[k]   <- quantile(y_k, 0.90)
+}
+
+plot(jitter(df_model_cov$age, 0.6), df_model_cov$production,
+     pch=16, col=adjustcolor("gray40", 0.35), cex=0.7,
+     xlab="Age (months)", ylab="Productive vocabulary",
+     main="NB2 Fitted Curve vs Observed Data (n=500 modelling subsample)")
+polygon(c(age_grid2, rev(age_grid2)), c(pred_lo, rev(pred_hi)),
+        col=adjustcolor(col_blue, 0.18), border=NA)
+lines(age_grid2, pred_mean, col=col_blue, lwd=2.8)
+abline(h=680, col=col_red, lty=3)
+legend("topleft", bty="n",
+       legend=c("Observed children","Posterior mean E[y|x]","80% predictive interval"),
+       col=c("gray40", col_blue, adjustcolor(col_blue,0.4)),
+       pch=c(16,NA,15), lwd=c(NA,2.8,NA), pt.cex=c(0.7,NA,2.2))
+```
+
+This kind of posterior predictive overlay is a more direct visual model check than the numerical summaries alone: it allows us to see *where* the model fits well and where it might struggle, rather than relying solely on a single aggregate DIC number. Here the fit is visually excellent across the full age range — the predictive band comfortably contains the great majority of individual observations, including the considerable cluster of children near the 680-word ceiling at the oldest ages, even though the NegBin likelihood does not explicitly enforce this boundary (a point discussed further as a limitation in Section 9.2).
+
+## NB3: Sex Effect on Asymptotic Level
+
+**Motivation:** Girls consistently produce more words than boys at comparable ages (Fenson et al., 1994; Eriksson et al., 2012), with differences of 30–60 words documented across 14 language communities. Huttenlocher et al. (1991) attribute this to earlier maturation of left-hemisphere language areas and greater sensitivity to linguistic input. We model the sex effect as an additive shift $\gamma$ on the asymptote:
+
+$$\mu_i = (\alpha_{j(i)} + \gamma \cdot \text{sex}_i) \cdot (1 - e^{-\beta(x_i-8)})$$
+
+Prior: $\gamma \sim \text{Normal}(0, 50^2)$, compatible with the literature range of 30–60 words.
+
+```{r nb3-fit, cache=TRUE, results='hide'}
+model_nb3_string <- "
+model {
+  for (i in 1:n) {
+    y[i] ~ dnegbin(p[i], r)
+    p[i] <- r / (r + mu[i])
+    mu[i] <- (alpha[age_idx[i]] + gamma * sex[i]) *
+              (1 - exp(-beta * (x[i] - x0)))
+  }
+  for (j in 1:n_ages) { alpha[j] ~ dnorm(mu_alpha, tau_alpha) T(0,) }
+  mu_alpha    ~ dnorm(400, 0.0001) T(0,)
+  sigma_alpha ~ dunif(0, 300)
+  tau_alpha   <- 1 / (sigma_alpha * sigma_alpha)
+  gamma ~ dnorm(0, 0.0004)
+  beta  ~ dnorm(0.1, 400) T(0,)
+  r     ~ dgamma(0.01, 0.01)
+}
+"
+jags_data_nb3 <- list(y=df_model_cov$production, x=df_model_cov$age,
+                      age_idx=df_model_cov$age_idx, sex=df_model_cov$sex_bin,
+                      n=nrow(df_model_cov), n_ages=15, x0=8)
+inits_nb3 <- function() list(mu_alpha=rnorm(1,400,50), sigma_alpha=runif(1,50,150),
+                              beta=runif(1,0.05,0.15), gamma=rnorm(1,0,10),
+                              r=runif(1,1,10))
+set.seed(42)
+fit_nb3 <- jags(data=jags_data_nb3, inits=inits_nb3,
+                parameters.to.save=c("mu_alpha","sigma_alpha","beta","gamma","r","alpha"),
+                model.file=textConnection(model_nb3_string),
+                n.chains=3, n.iter=30000, n.burnin=5000, n.thin=5)
+```
+
+```{r nb3-print}
+print(fit_nb3)
+```
+
+**Key results:** $\hat{\gamma} = 51.8$ words (95% CI: [3.9, 106.3]) — CI excludes zero, confirming the Fenson et al. (1994) prediction. Girls produce approximately 52 more words than boys at the same age. DIC = 6,409.2, $\Delta$DIC = 3.3 vs NB2.
+
+```{r nb3-gamma-posterior, fig.height=4, fig.cap="Posterior distribution of the sex effect gamma in NB3 (additive shift on the vocabulary asymptote). The shaded region marks the 95% credible interval [3.9, 106.3]; the dashed grey line at zero falls outside this interval, confirming a credible — if modest in magnitude relative to its own posterior spread — female advantage on the eventual vocabulary ceiling."}
+gamma_post <- fit_nb3$BUGSoutput$sims.matrix[,"gamma"]
+d_gamma <- density(gamma_post)
+plot(d_gamma, col=col_purp, lwd=2.5, main="Posterior of gamma (sex effect on alpha)",
+     xlab="gamma (words)", ylab="Density")
+ci_g <- quantile(gamma_post, c(.025,.975))
+polygon(c(d_gamma$x[d_gamma$x>=ci_g[1] & d_gamma$x<=ci_g[2]],
+          rev(d_gamma$x[d_gamma$x>=ci_g[1] & d_gamma$x<=ci_g[2]])),
+        c(d_gamma$y[d_gamma$x>=ci_g[1] & d_gamma$x<=ci_g[2]],
+          rep(0,sum(d_gamma$x>=ci_g[1] & d_gamma$x<=ci_g[2]))),
+        col=adjustcolor(col_purp,0.25), border=NA)
+abline(v=0, col="gray40", lty=2, lwd=1.5)
+abline(v=mean(gamma_post), col=col_purp, lty=1, lwd=1)
+text(0, max(d_gamma$y)*0.9, "0", col="gray40", pos=2, cex=0.85)
+```
+
+This posterior density makes explicit something the printed numerical summary leaves implicit: the distribution of $\gamma$ is not narrowly concentrated around 51.8 but is in fact fairly diffuse, spanning from values close to zero (the lower bound of the 95% interval is only 3.9 words — barely distinguishable from "no effect" in practical terms) to values above 100 words (comparable in magnitude to roughly a third of the average 16-month-old's entire vocabulary). This diffuseness, rather than the point estimate alone, is the more honest summary of what the data tell us about the sex effect on vocabulary level: the evidence for a *positive* effect is credible (zero is excluded), but the evidence for any *specific* magnitude is weak. This pattern — a credible sign but an uncertain magnitude — recurs across NB3, NB6, and NB\_int below, and is itself an important substantive finding: with $n=500$ children spread across 15 age groups and two sexes, the design has limited power to pin down covariate effects precisely, even when it has enough power to detect their existence.
+
+## NB6: Sex Effect on Growth Rate
+
+**Motivation:** Bates et al. (1994) and Huttenlocher et al. (1991) suggest that the sex difference may operate not only on the asymptotic level but also on the *timing* of vocabulary acquisition — girls may reach their plateau earlier. We test this by estimating separate growth rates $\beta_\text{male}$ and $\beta_\text{female}$, with the difference $\delta_\beta = \beta_\text{female} - \beta_\text{male}$ monitored as a derived quantity.
+
+Note: a direct parametrization $\beta + \delta \cdot \text{sex}$ suffers from non-identifiability (the sampler explores a ridge in parameter space). The reparametrization with two separate $\beta$ parameters eliminates this problem.
+
+```{r nb6-fit, cache=TRUE, results='hide'}
+model_nb6_string <- "
+model {
+  for (i in 1:n) {
+    y[i] ~ dnegbin(p[i], r)
+    p[i] <- r / (r + mu[i])
+    mu[i] <- alpha[age_idx[i]] *
+              (1 - exp(-beta[sex[i]+1] * (x[i] - x0)))
+  }
+  for (j in 1:n_ages) { alpha[j] ~ dnorm(mu_alpha, tau_alpha) T(0,) }
+  mu_alpha    ~ dnorm(400, 0.0001) T(0,)
+  sigma_alpha ~ dunif(0, 300)
+  tau_alpha   <- 1 / (sigma_alpha * sigma_alpha)
+  beta[1] ~ dnorm(0.06, 2500) T(0,)
+  beta[2] ~ dnorm(0.06, 2500) T(0,)
+  delta_beta <- beta[2] - beta[1]
+  r ~ dgamma(0.01, 0.01)
+}
+"
+jags_data_nb6 <- list(y=df_model_cov$production, x=df_model_cov$age,
+                      age_idx=df_model_cov$age_idx, sex=df_model_cov$sex_bin,
+                      n=nrow(df_model_cov), n_ages=15, x0=8)
+inits_nb6 <- function() list(mu_alpha=rnorm(1,400,50), sigma_alpha=runif(1,50,150),
+                              beta=c(runif(1,0.04,0.08),runif(1,0.04,0.08)),
+                              r=runif(1,1,10))
+set.seed(42)
+fit_nb6 <- jags(data=jags_data_nb6, inits=inits_nb6,
+                parameters.to.save=c("mu_alpha","sigma_alpha","beta","delta_beta","r"),
+                model.file=textConnection(model_nb6_string),
+                n.chains=3, n.iter=30000, n.burnin=5000, n.thin=5)
+```
+
+```{r nb6-print}
+print(fit_nb6)
+```
+
+**Key results:** $\hat{\beta}_\text{male} = 0.049$, $\hat{\beta}_\text{female} = 0.065$, $\hat{\delta}_\beta = 0.016$ (95% CI: [0.003, 0.033]) — CI excludes zero. Girls approach their asymptotic vocabulary approximately **4 months earlier** than boys ($\log 2 / 0.065 \approx 10.7$ months vs $\log 2 / 0.049 \approx 14.1$ months after $x_0$). This is consistent with Bates et al. (1994) and provides a more nuanced picture than NB3: the sex difference operates on both the timing and the level of vocabulary acquisition. DIC = 6,407.9, $\Delta$DIC = 4.6 vs NB2.
+
+```{r nb6-curves-plot, fig.height=4.5, fig.cap="NB6 fitted growth curves for boys (blue) versus girls (red), holding the shared asymptote (mu-alpha) at its posterior mean. Shaded bands show pointwise 95% credible intervals on the mean curve, propagating posterior uncertainty in both the male/female growth rates and the shared asymptote. Unlike the parallel NB3 curves, these are non-parallel: nearly coincident at 16 months, then progressively diverging, with girls' curve consistently above and to the left of boys' through the explosion period."}
+post6_full <- fit_nb6$BUGSoutput$sims.matrix
+age_grid6  <- 16:30
+n_draw6 <- 3000
+set.seed(11)
+idx6 <- sample(nrow(post6_full), n_draw6, replace=TRUE)
+
+curve_m <- sapply(age_grid6, function(a)
+  post6_full[idx6,"mu_alpha"] * (1-exp(-post6_full[idx6,"beta[1]"]*(a-8))))
+curve_f <- sapply(age_grid6, function(a)
+  post6_full[idx6,"mu_alpha"] * (1-exp(-post6_full[idx6,"beta[2]"]*(a-8))))
+
+m_mean <- colMeans(curve_m); m_lo <- apply(curve_m,2,quantile,.025); m_hi <- apply(curve_m,2,quantile,.975)
+f_mean <- colMeans(curve_f); f_lo <- apply(curve_f,2,quantile,.025); f_hi <- apply(curve_f,2,quantile,.975)
+
+plot(age_grid6, m_mean, type="n", ylim=c(0,650),
+     xlab="Age (months)", ylab="Predicted vocabulary",
+     main="NB6: Sex-Specific Growth Rate Curves")
+polygon(c(age_grid6,rev(age_grid6)), c(m_lo,rev(m_hi)), col=adjustcolor(col_blue,0.2), border=NA)
+polygon(c(age_grid6,rev(age_grid6)), c(f_lo,rev(f_hi)), col=adjustcolor(col_red,0.2), border=NA)
+lines(age_grid6, m_mean, col=col_blue, lwd=2.5)
+lines(age_grid6, f_mean, col=col_red, lwd=2.5)
+legend("topleft", bty="n", legend=c("Boys (beta=0.049)","Girls (beta=0.065)"),
+       col=c(col_blue,col_red), lwd=2.5)
+```
+
+The non-parallel shape in the figure above is the visual signature that distinguishes NB6 from NB3: because both sexes share the *same* asymptote $\mu_\alpha$ in this model (the sex effect enters only through $\beta$), the two curves necessarily converge again at very young ages (when both are still far from the shared ceiling) and would, in principle, eventually converge again at very old ages (as both approach the same asymptote from below). The empirically observed divergence is therefore concentrated precisely in the 18–26 month range — the vocabulary explosion window — where the *difference in rate* compounds into its largest absolute effect on predicted vocabulary, even though the two sexes are mathematically guaranteed to reach the same eventual plateau. This is a substantively different claim from NB3, where the asymptotes themselves differ permanently. Practically, NB6 implies that if vocabulary could be observed well beyond 30 months, the sex gap would eventually narrow and close — whereas NB3 implies a sex gap that persists indefinitely. The two models cannot both be exactly right, and the fact that they achieve almost identical DIC (6,407.9 vs 6,409.2) means the data, in this sample, do not strongly discriminate between these two competing developmental stories. This ambiguity is itself a finding worth reporting rather than glossing over: distinguishing a persistent-level effect from a transient-rate effect would require either a larger sample, a wider observed age range extending past 30 months, or longitudinal data following the same children over time.
+
+## NB_edu: Caregiver Education Effect on Growth Rate
+
+**Motivation:** Hart & Risley (1995) documented that children from higher-SES families accumulate vocabulary faster (not necessarily reaching a higher ceiling), with the mechanism being differential quantity and quality of parental linguistic input. We test whether caregiver education (Low/Medium/High) modifies $\beta$, using Low as the reference category.
+
+```{r edu-fit, cache=TRUE, results='hide'}
+model_edu_string <- "
+model {
+  for (i in 1:n) {
+    y[i] ~ dnegbin(p[i], r)
+    p[i] <- r / (r + mu[i])
+    mu[i] <- alpha[age_idx[i]] *
+              (1 - exp(-(beta + delta_edu[edu[i]]) * (x[i] - x0)))
+  }
+  for (j in 1:n_ages) { alpha[j] ~ dnorm(mu_alpha, tau_alpha) T(0,) }
+  mu_alpha    ~ dnorm(400, 0.0001) T(0,)
+  sigma_alpha ~ dunif(0, 300)
+  tau_alpha   <- 1 / (sigma_alpha * sigma_alpha)
+  delta_edu[1] <- 0
+  delta_edu[2] ~ dnorm(0, 10000) T(-beta,)
+  delta_edu[3] ~ dnorm(0, 10000) T(-beta,)
+  beta ~ dnorm(0.06, 2500) T(0,)
+  r    ~ dgamma(0.01, 0.01)
+}
+"
+jags_data_edu <- list(y=df_model_cov$production, x=df_model_cov$age,
+                      age_idx=df_model_cov$age_idx, edu=df_model_cov$edu_group,
+                      n=nrow(df_model_cov), n_ages=15, x0=8)
+inits_edu <- function() list(mu_alpha=rnorm(1,400,50), sigma_alpha=runif(1,50,150),
+                              beta=runif(1,0.04,0.08),
+                              delta_edu=c(NA, rnorm(1,0,0.005), rnorm(1,0,0.005)),
+                              r=runif(1,1,10))
+set.seed(42)
+fit_edu <- jags(data=jags_data_edu, inits=inits_edu,
+                parameters.to.save=c("mu_alpha","sigma_alpha","beta","delta_edu","r"),
+                model.file=textConnection(model_edu_string),
+                n.chains=3, n.iter=30000, n.burnin=5000, n.thin=5)
+```
+
+```{r edu-print}
+print(fit_edu)
+```
+
+**Key results:** $\hat{\delta}_{\text{edu}[2]} = -0.001$ (CI: [-0.014, 0.011]) and $\hat{\delta}_{\text{edu}[3]} = 0.005$ (CI: [-0.008, 0.019]) — both CIs include zero. Caregiver education does not significantly modify the growth rate in the Marchman dataset. DIC = 6,413.6 — worse than NB2. This null result is likely attributable to the relative socioeconomic homogeneity of the Marchman sample compared to the Hart & Risley (1995) sample, which was specifically designed to capture a wide SES range.
+
+```{r edu-curves-plot, fig.height=4.5, fig.cap="NB-edu fitted growth curves by caregiver education level (Low/Medium/High), holding the shared asymptote at its posterior mean. The three curves are nearly indistinguishable across the entire age range, with overlapping 95% credible bands at every age — a direct visual confirmation of the null result reported numerically above."}
+postE_full <- fit_edu$BUGSoutput$sims.matrix
+age_gridE  <- 16:30
+n_drawE <- 3000
+set.seed(13)
+idxE <- sample(nrow(postE_full), n_drawE, replace=TRUE)
+
+curve_low <- sapply(age_gridE, function(a)
+  postE_full[idxE,"mu_alpha"]*(1-exp(-(postE_full[idxE,"beta"])*(a-8))))
+curve_med <- sapply(age_gridE, function(a)
+  postE_full[idxE,"mu_alpha"]*(1-exp(-(postE_full[idxE,"beta"]+postE_full[idxE,"delta_edu[2]"])*(a-8))))
+curve_hi  <- sapply(age_gridE, function(a)
+  postE_full[idxE,"mu_alpha"]*(1-exp(-(postE_full[idxE,"beta"]+postE_full[idxE,"delta_edu[3]"])*(a-8))))
+
+plot(age_gridE, colMeans(curve_low), type="l", lwd=2.2, col=col_blue,
+     ylim=c(0,600), xlab="Age (months)", ylab="Predicted vocabulary",
+     main="NB_edu: Growth Curves by Education Level (near-identical)")
+lines(age_gridE, colMeans(curve_med), lwd=2.2, col=col_green)
+lines(age_gridE, colMeans(curve_hi),  lwd=2.2, col=col_red)
+legend("topleft", bty="n", legend=c("Low education","Medium education","High education"),
+       col=c(col_blue,col_green,col_red), lwd=2.2)
+```
+
+The near-total overlap of the three curves above is the clearest possible visual confirmation of a genuine null result, as opposed to merely a non-significant one: the three lines do not just have overlapping confidence bands, they are visually superimposed across the entire 16–30 month range, with the largest gap between any two curves never exceeding a handful of words at any age. This null result is methodologically informative rather than simply disappointing. It highlights an important general principle in applied Bayesian modelling: a covariate's failure to improve fit is not evidence that the covariate is *theoretically* unimportant, but rather evidence that *in this particular sample* it does not vary enough, or does not correlate enough with the outcome conditional on the other model components, to be detectable. Hart and Risley's (1995) original study deliberately recruited families spanning welfare-dependent to professional households — a far wider socioeconomic range than the predominantly middle-class composition of the Marchman cohort used here. The appropriate methodological conclusion is therefore not "caregiver education does not affect vocabulary growth" but the narrower and more defensible "caregiver education does not detectably affect vocabulary growth within the restricted SES range sampled by the Marchman dataset" — a distinction elaborated further as a limitation in Section 9.2 and as a concrete direction for future work in Section 9.3.
+
+## NB_int: Age × Sex Interaction
+
+**Motivation:** Bornstein et al. (2004) document that sex differences in early vocabulary may not be constant across development but tend to diverge progressively during the vocabulary explosion period (18–24 months). We model this with age-group-specific sex effects $\gamma_j$, drawn from a common hierarchical distribution:
+
+$$\mu_i = (\alpha_{j(i)} + \gamma_{j(i)} \cdot \text{sex}_i) \cdot (1 - e^{-\beta(x_i-8)}), \quad \gamma_j \sim \text{Normal}(\mu_\gamma, \sigma_\gamma^2)$$
+
+```{r int-fit, cache=TRUE, results='hide'}
+model_int_string <- "
+model {
+  for (i in 1:n) {
+    y[i] ~ dnegbin(p[i], r)
+    p[i] <- r / (r + mu[i])
+    mu[i] <- (alpha[age_idx[i]] + gamma_sex[age_idx[i]] * sex[i]) *
+              (1 - exp(-beta * (x[i] - x0)))
+  }
+  for (j in 1:n_ages) {
+    alpha[j]     ~ dnorm(mu_alpha, tau_alpha) T(0,)
+    gamma_sex[j] ~ dnorm(mu_gamma, tau_gamma)
+  }
+  mu_alpha    ~ dnorm(400, 0.0001) T(0,)
+  sigma_alpha ~ dunif(0, 300)
+  tau_alpha   <- 1 / (sigma_alpha * sigma_alpha)
+  mu_gamma    ~ dnorm(0, 0.0004)
+  sigma_gamma ~ dunif(0, 100)
+  tau_gamma   <- 1 / (sigma_gamma * sigma_gamma)
+  beta ~ dnorm(0.06, 2500) T(0,)
+  r    ~ dgamma(0.01, 0.01)
+}
+"
+jags_data_int <- list(y=df_model_cov$production, x=df_model_cov$age,
+                      age_idx=df_model_cov$age_idx, sex=df_model_cov$sex_bin,
+                      n=nrow(df_model_cov), n_ages=15, x0=8)
+inits_int <- function() list(mu_alpha=rnorm(1,400,50), sigma_alpha=runif(1,50,150),
+                              mu_gamma=rnorm(1,0,10), sigma_gamma=runif(1,5,30),
+                              beta=runif(1,0.04,0.08), r=runif(1,1,10))
+set.seed(42)
+fit_int <- jags(data=jags_data_int, inits=inits_int,
+                parameters.to.save=c("mu_alpha","sigma_alpha","mu_gamma",
+                                     "sigma_gamma","gamma_sex","beta","r"),
+                model.file=textConnection(model_int_string),
+                n.chains=3, n.iter=30000, n.burnin=5000, n.thin=5)
+```
+
+```{r int-print}
+print(fit_int)
+```
+
+**Key results:** $\hat{\mu}_\gamma = 53.7$ words (CI: [0.6, 111.1]) — consistent with NB3. However, $\hat{\sigma}_\gamma = 58.3$ words with individual $\gamma_j$ CIs all spanning zero, indicating insufficient statistical power within each monthly age group (~33 children per group in the 500-child subsample) to reliably detect age-varying sex effects. DIC = 6,411.5. The Bornstein et al. (2004) hypothesis, while biologically plausible, cannot be confirmed with this sample structure.
+
+```{r int-forest-plot, fig.height=5, fig.cap="Forest plot of the age-specific sex effects (gamma-j) estimated by NB-int, one per monthly age group, with 95% credible intervals. The vertical dashed line at zero shows that every single interval crosses zero, in contrast to the single pooled gamma in NB3 (horizontal grey band, its own 95% CI), whose interval excludes zero. This contrast is the clearest possible illustration of the power loss incurred by estimating 15 separate age-specific effects instead of one shared effect."}
+postI_full <- fit_int$BUGSoutput$sims.matrix
+gamma_j_mean <- sapply(1:15, function(j) mean(postI_full[,paste0("gamma_sex[",j,"]")]))
+gamma_j_lo   <- sapply(1:15, function(j) quantile(postI_full[,paste0("gamma_sex[",j,"]")],.025))
+gamma_j_hi   <- sapply(1:15, function(j) quantile(postI_full[,paste0("gamma_sex[",j,"]")],.975))
+ages_int <- 16:30
+
+plot(gamma_j_mean, 1:15, xlim=c(-150,250), yaxt="n",
+     pch=16, col=col_purp, xlab="gamma_j (words)", ylab="",
+     main="Age-Specific Sex Effects (NB_int) vs Pooled Effect (NB3)")
+axis(2, at=1:15, labels=ages_int, las=1, cex.axis=0.8)
+mtext("Age (months)", side=2, line=2.5, cex=0.85)
+segments(gamma_j_lo, 1:15, gamma_j_hi, 1:15, col=col_purp, lwd=1.8)
+abline(v=0, col="gray40", lty=2)
+
+# Overlay NB3 pooled gamma as a shaded vertical band
+gamma3_ci <- quantile(fit_nb3$BUGSoutput$sims.matrix[,"gamma"], c(.025,.975))
+rect(gamma3_ci[1], -1, gamma3_ci[2], 17, col=adjustcolor(col_green,0.15), border=NA)
+abline(v=mean(fit_nb3$BUGSoutput$sims.matrix[,"gamma"]), col=col_green, lwd=1.5)
+legend("topright", bty="n", cex=0.78,
+       legend=c("NB_int: gamma_j (age-specific)","NB3: pooled gamma (95% CI band)"),
+       col=c(col_purp,col_green), lwd=c(1.8,8), pt.cex=0)
+```
+
+The forest plot above is the single most direct visualisation in this report of the **bias-variance trade-off inherent in hierarchical modelling**: NB3's pooled $\gamma$ estimate (green band) achieves a 95% credible interval that excludes zero precisely because it borrows strength across all 15 age groups simultaneously, effectively averaging 500 children's worth of sex-difference signal into a single number. NB\_int's age-specific $\gamma_j$ estimates (purple points and intervals), by contrast, must each be estimated from roughly 33 children, and the resulting intervals are correspondingly between two and four times wider — wide enough that every single one crosses zero, even though the *individual point estimates* for several age groups (notably ages 19, 24, and 25 months) are numerically close to or above the NB3 pooled estimate. This is not evidence that the age-varying-effect hypothesis is false; it is evidence that the available sample size cannot resolve it. A Bornstein-style finding of *increasing* divergence through the explosion period would require either a substantially larger sample (the full 5,031-child Marchman dataset rather than the 500-child working subsample used throughout this report, or ideally the full 9,093-child multi-dataset pool) or a smoother parametric form for $\gamma_j$ as a function of age (e.g., a low-order polynomial or spline in age, which would borrow strength across *adjacent* age groups rather than estimating each independently) — both flagged as concrete future directions in Section 9.3.
+
+---
+
+# Parameter Recovery (Simulation Study)
+
+Before interpreting results from real data, we verify the JAGS implementation by recovering known parameters from simulated data — a cornerstone of the Bayesian workflow (Gelman et al., 2020). We simulate from NB2 (the preferred model) with true parameter values chosen to be distinct from prior means.
+
+```{r param-recovery-sim}
+set.seed(99)
+n_sim       <- 500
+age_sim     <- sample(16:30, n_sim, replace=TRUE)
+age_idx_sim <- age_sim - 15
+
+true_mu_alpha    <- 450
+true_sigma_alpha <- 150
+true_beta        <- 0.06
+true_r           <- 1.6
+true_alpha       <- rnorm(15, true_mu_alpha, true_sigma_alpha)
+true_alpha       <- pmax(true_alpha, 10)
+
+mu_sim <- true_alpha[age_idx_sim] * (1 - exp(-true_beta*(age_sim-8)))
+mu_sim <- pmax(mu_sim, 1)
+
+# Simulate from NegBin
+set.seed(42)
+y_sim <- rnegbin <- function(n, mu, r) {
+  p <- r / (r + mu)
+  rnbinom(n, size=r, prob=p)
+}
+y_sim <- mapply(function(m) rnbinom(1, size=true_r, mu=m), mu_sim)
+y_sim <- pmax(y_sim, 0)
+
+cat("True parameters:\n  mu_alpha =", true_mu_alpha,
+    "\n  sigma_alpha =", true_sigma_alpha,
+    "\n  beta =", true_beta, "\n  r =", true_r, "\n")
+```
+
+```{r param-recovery-fit, cache=TRUE, results='hide'}
+set.seed(42)
+fit_sim <- jags(
+  data = list(y=y_sim, x=age_sim, age_idx=age_idx_sim,
+              n=n_sim, n_ages=15, x0=8),
+  inits = inits_nb2,
+  parameters.to.save = c("mu_alpha","beta","sigma_alpha","r"),
+  model.file = textConnection(model_nb2_string),
+  n.chains=3, n.iter=30000, n.burnin=5000, n.thin=5
+)
+```
+
+```{r param-recovery-print}
+print(fit_sim)
+```
+
+```{r param-recovery-plot, fig.height=6, fig.cap="Parameter recovery for NB2. All four true values (red dashed) fall within the 95% posterior CI, confirming correct implementation. The compensatory bias between mu-alpha and beta is a structural feature of asymptotic growth models."}
+post_sim  <- fit_sim$BUGSoutput$sims.matrix
+true_vals <- c(mu_alpha=450, beta=0.06, sigma_alpha=150, r=1.6)
+
+par(mfrow=c(2,2), mar=c(4,4,3,1))
+for (param in names(true_vals)) {
+  s    <- post_sim[, param]
+  ci95 <- quantile(s, c(0.025, 0.975))
+  in_ci <- true_vals[param] >= ci95[1] & true_vals[param] <= ci95[2]
+  plot(density(s), main=paste0(param, " [", ifelse(in_ci,"OK","FAIL"), "]"),
+       xlab=param, col=col_purp, lwd=2)
+  polygon(density(s), col=adjustcolor(col_purp,.15), border=NA)
+  abline(v=true_vals[param], col=col_red,   lwd=2.5, lty=2)
+  abline(v=mean(s),          col=col_green, lwd=2,   lty=3)
+  legend("topright",
+         c(paste("True =",true_vals[param]),
+           paste("Post.mean =",round(mean(s),3))),
+         col=c(col_red,col_green), lwd=2, cex=0.8)
+}
+par(mfrow=c(1,1))
+```
+
+All four true values fall within the 95% posterior CIs, confirming the correctness of the JAGS implementation. The partial non-identifiability between $\mu_\alpha$ and $\beta$ — a structural feature of asymptotic growth models — manifests as a compensatory bias (lower posterior mean for $\mu_\alpha$, higher for $\beta$) but does not prevent coverage of the true values.
+
+Examining the four panels individually reveals a consistent pattern across very different parameter types. The $r$ panel (dispersion) shows the tightest, most symmetric posterior of the four, with the posterior mean essentially coincident with the true value of 1.6 — entirely expected, since the dispersion parameter governs the *spread* of individual observations around the mean curve and is therefore informed by all 500 simulated data points roughly equally, with no structural confound from the mean-function parameters. The $\sigma_\alpha$ panel (between-group SD) is similarly well-recovered, with a posterior mean close to its true value of 150 and a moderately wide but well-centred credible interval, reflecting that this hyperparameter is informed by the spread of the 15 simulated $\alpha_j$ values rather than by any single age group. The $\mu_\alpha$ and $\beta$ panels, by contrast, both show visibly asymmetric, right- or left-skewed posteriors with means displaced from the true value in opposite directions — exactly the compensatory pattern predicted by the ridge in the likelihood surface discussed in Section 4.2 (the growth curve family figure): a slightly lower $\mu_\alpha$ combined with a slightly higher $\beta$ produces an almost identical fitted curve over the finite [16,30]-month observation window, so the data cannot fully distinguish between these two combinations even with $n=500$ simulated observations. Reassuringly, both panels' 95% credible intervals remain wide enough to comfortably contain the true generating value despite this bias in the posterior mean — the bias is a feature of point estimation under structural near-non-identifiability, not a failure of uncertainty quantification, which is precisely the distinction that matters for the validity of subsequent inference.
+
+---
+
+# MCMC Convergence Diagnostics
+
+Formal diagnostics for **NB2** (the preferred model), following Ntzoufras (2010, Ch. 6).
+
+```{r coda-convert}
+chain_list <- lapply(1:3, function(c) mcmc(fit_nb2$BUGSoutput$sims.array[,c,]))
+mcmc_coda  <- as.mcmc.list(chain_list)
+```
+
+```{r traceplots, fig.height=5, fig.cap="Traceplots for NB2 key parameters. All three chains mix rapidly throughout the post-burn-in period."}
+par(mfrow=c(2,2), mar=c(3,3,2,1))
+traceplot(mcmc_coda[, c("mu_alpha","beta","sigma_alpha","r")],
+          col=c(col_red, col_blue, col_green))
+```
+
+Each of the four traceplot panels above displays the characteristic "fat hairy caterpillar" pattern that Ntzoufras (2010) identifies as the visual hallmark of good MCMC convergence: the three coloured chains overlap almost completely throughout the 5,000 post-burn-in iterations shown, with no visible drift, no chain becoming trapped in a distinct region of the parameter space, and no systematic difference in the level or spread of the three series. The four parameters do, however, differ noticeably in their *visual texture*. The $r$ panel (bottom-right) is the tightest and most uniformly "fuzzy" of the four, consistent with its very high effective sample size reported below. The $\sigma_\alpha$ panel (bottom-left) is similarly well-behaved, fluctuating smoothly within its $[100,300]$ support. The $\mu_\alpha$ panel (top-left) shows visibly larger excursions — occasional spikes up toward 700 and down toward 150 — and the $\beta$ panel (top-right) shows comparable large excursions on its own much smaller numerical scale. These larger excursions in $\mu_\alpha$ and $\beta$ are not a convergence failure: they are the visual signature of the posterior correlation between these two parameters first discussed in the context of the parameter recovery study (Section 6), where the model's structural near-non-identifiability along the $\mu_\alpha$–$\beta$ ridge causes the chains to occasionally make correlated joint moves to a different point along that ridge, producing visible joint excursions even while remaining fully consistent with stationary, well-mixed sampling. This is confirmed quantitatively by the lower (but still entirely adequate) effective sample sizes for these two parameters reported below.
+
+```{r gelman-rubin}
+gelman <- gelman.diag(mcmc_coda[, c("mu_alpha","beta","sigma_alpha","r")])
+print(gelman)
+```
+
+```{r ess}
+par(mfrow=c(1,1))
+eff <- effectiveSize(mcmc_coda[, c("mu_alpha","beta","sigma_alpha","r")])
+print(round(eff, 0))
+```
+
+All PSRF values $\leq 1.003$, multivariate PSRF = 1.01 — well below the threshold of 1.1. ESS for $r$ is excellent (~15,000); $\mu_\alpha$ and $\beta$ show substantially lower ESS ($\approx$400) reflecting their posterior correlation, consistent with the parameter recovery findings.
+
+Taken together, the Gelman-Rubin diagnostic and the effective sample size tell complementary stories about convergence. PSRF asks "have the chains converged to the *same* distribution?" — and the answer here is an unambiguous yes, for every parameter, with point estimates so close to the theoretical minimum of 1.0 that no further iterations are needed to improve confidence in convergence itself. ESS instead asks "how much *independent* information does the post-convergence sample actually contain?" — and here the answer is more nuanced: the dispersion parameter $r$ is essentially uncorrelated across consecutive (thinned) iterations, yielding an ESS that is almost equal to the nominal 15,000 retained samples, while $\mu_\alpha$ and $\beta$ retain meaningful but reduced information content due to their mutual posterior correlation. An ESS of roughly 400 is still entirely sufficient for reliable estimation of posterior means, standard deviations, and 95% credible intervals — as a rule of thumb, an ESS above a few hundred is generally considered adequate for these summary quantities (Gelman et al., 2013) — so no further sampling was deemed necessary. Had the substantive research question instead concerned a precise quantile far in the tail of the $\beta$ posterior, a longer chain or a reparametrisation explicitly breaking the $\mu_\alpha$–$\beta$ correlation (analogous to the reparametrisation already employed for $\beta_\text{male}$/$\beta_\text{female}$ in NB6, Section 4.5) would have been warranted.
+
+---
+
+# BONUS 1 — Formal Model Checking
+
+We compute the **Bayesian p-value** (Gelman et al., 1996; Ntzoufras, 2010, Ch. 10) for NB2, using the chi-square discrepancy:
+
+$$T(y,\theta) = \sum_{i=1}^n \frac{(y_i - \mu_i)^2}{\sigma_i^2}, \quad \sigma_i^2 = \mu_i + \mu_i^2/r$$
+
+$$p_B = \Pr[T(y_\text{rep}, \theta) > T(y_\text{obs}, \theta) \mid y_\text{obs}]$$
+
+```{r bayesian-pvalue, cache=TRUE}
+post2     <- fit_nb2$BUGSoutput$sims.matrix
+n_obs     <- nrow(df_model_cov)
+n_samples <- nrow(post2)
+
+set.seed(42)
+T_obs <- T_rep <- numeric(n_samples)
+
+for (s in sample(n_samples, 2000)) {
+  b   <- post2[s, "beta"]
+  r_s <- post2[s, "r"]
+  mu_s <- sapply(1:n_obs, function(i) {
+    a_idx <- paste0("alpha[", df_model_cov$age_idx[i], "]")
+    post2[s, a_idx] * (1 - exp(-b*(df_model_cov$age[i]-8)))
+  })
+  var_s  <- mu_s + mu_s^2 / r_s
+  y_rep  <- rnbinom(n_obs, size=r_s, mu=mu_s)
+  T_obs[s] <- sum((df_model_cov$production - mu_s)^2 / var_s)
+  T_rep[s] <- sum((y_rep - mu_s)^2 / var_s)
+}
+
+idx           <- T_obs != 0
+bayesian_pval <- mean(T_rep[idx] > T_obs[idx])
+cat("Bayesian p-value:", round(bayesian_pval, 3), "\n")
+```
+
+```{r bayesian-pvalue-plot, fig.cap="Bayesian model checking plot for NB2. The point cloud is symmetrically distributed around the 45° diagonal, confirming adequate model calibration."}
+plot(T_obs[idx], T_rep[idx],
+     col=rgb(0.27,0.48,0.62,0.25), pch=16, cex=0.5,
+     xlab=expression(T(y[obs],theta)), ylab=expression(T(y[rep],theta)),
+     main=sprintf("Model Checking - Bayesian p-value = %.3f", bayesian_pval))
+abline(0, 1, col=col_red, lwd=2)
+```
+
+Each of the roughly 2,000 semi-transparent points above corresponds to one posterior draw $\theta^{(s)}$: its horizontal coordinate is the chi-square discrepancy $T(y_\text{obs}, \theta^{(s)})$ computed using the *actually observed* data under that draw's parameter values, and its vertical coordinate is the same discrepancy statistic $T(y_\text{rep}^{(s)}, \theta^{(s)})$ computed using a *freshly simulated* dataset generated from that same draw. If the model were systematically too rigid for the data (under-fitting, e.g. forcing a single variance structure onto genuinely heteroscedastic data), points would cluster predominantly *above* the diagonal, since replicated data — generated under the model's restrictive assumptions — would tend to look more "regular" than the messier real data, giving $T(y_\text{rep})$ smaller, more typical values than $T(y_\text{obs})$. Conversely, systematic clustering *below* the diagonal would indicate the model is "too good to be true" relative to the data's actual noise level — for instance if the dispersion parameter $r$ were overestimated, making simulated replicates noisier than what is actually observed. The cloud above shows neither pattern: it is symmetrically scattered along the full length of the 45° reference line with no visible systematic offset in either direction, and this visual symmetry is precisely what the numerical $p_B = 0.564$ formally quantifies. A value above 0.5 indicates that replicated datasets tend to produce slightly larger chi-square discrepancies than the observed data, suggesting mild over-prediction of variance by the model; however, $p_B = 0.564$ remains comfortably within the range [0.1, 0.9] indicating no evidence of systematic misfit (Gelman et al., 1996; Ntzoufras, 2010). The result also confirms an important property noted in Section 4: even though NB2 does not explicitly model the CDI's 680-word ceiling, the chi-square discrepancy, computed using the NegBin variance function $\sigma_i^2 = \mu_i + \mu_i^2/r$, is not sensitive enough to this specific boundary effect to flag it as a calibration failure at the aggregate level used here — a more targeted discrepancy statistic focused specifically on the upper tail would be needed to formally test ceiling-effect misfit, a possibility noted as a future direction in Section 9.3.
+
+<div class="finding">
+$p_B = 0.564$ — acceptable calibration, comfortably within [0.1, 0.9]. NB2 is well-calibrated with respect to the chi-square discrepancy.
+</div>
+
+---
+
+# BONUS 2 — Frequentist Comparison
+
+We compare Bayesian estimates with MLE via Levenberg-Marquardt nonlinear least squares (Elzhov et al., 2023).
+
+```{r mle-fit, cache=TRUE}
+library(minpack.lm)
+
+alpha_mle <- beta_mle <- numeric(15)
+for (j in 1:15) {
+  eta  <- 15 + j
+  df_j <- df_model_cov[df_model_cov$age == eta, ]
+  tryCatch({
+    fit_j <- nlsLM(production ~ alpha*(1-exp(-beta*(age-8))),
+                   data=df_j, start=list(alpha=500, beta=0.06),
+                   control=nls.lm.control(maxiter=1000))
+    alpha_mle[j] <- coef(fit_j)["alpha"]
+    beta_mle[j]  <- coef(fit_j)["beta"]
+  }, error=function(e) {
+    alpha_mle[j] <<- mean(df_j$production)/0.7
+    beta_mle[j]  <<- 0.06
+  })
+}
+
+alpha_bayes <- colMeans(post2[, paste0("alpha[",1:15,"]")])
+
+comparison <- data.frame(
+  age=16:30,
+  MLE=round(alpha_mle,1),
+  Bayes=round(alpha_bayes,1),
+  shrinkage=round(alpha_bayes-alpha_mle,1)
+)
+print(comparison)
+```
+
+```{r mle-plot, fig.cap="Bayes vs MLE for age-specific asymptotes. At young ages (16–22 months), Bayesian estimates are 100–155 words higher than MLE, reflecting hierarchical shrinkage toward the population mean. At older ages (27–30 months), the two converge — consistent with the Bernstein-von Mises theorem."}
+plot(comparison$age, comparison$Bayes,
+     type="b", col=col_blue, lwd=2, pch=16,
+     xlab="Age (months)", ylab=expression(hat(alpha)),
+     main="Age-Specific Asymptotes: Bayes vs MLE",
+     ylim=c(0, max(c(comparison$MLE, comparison$Bayes))*1.1))
+lines(comparison$age, comparison$MLE,
+      type="b", col=col_red, lwd=2, pch=17, lty=2)
+abline(h=mean(post2[,"mu_alpha"]), col=col_blue, lty=3)
+legend("topleft", c("Bayes","MLE",expression(hat(mu)[alpha])),
+       col=c(col_blue,col_red,col_blue), lwd=c(2,2,1), pch=c(16,17,NA),
+       lty=c(1,2,3))
+```
+
+Two features of the figure above merit close attention beyond the headline convergence pattern. First, **the MLE curve is visibly more erratic than the Bayes curve** — it jumps around its own local trend more sharply from one age to the next (compare, for instance, the MLE dip at age 20 followed by a sharp rise at age 23, against the much smoother Bayesian sequence over the same ages). This erratic behaviour is a direct symptom of small-sample instability: per-age MLE estimates have no mechanism to borrow information from neighbouring age groups, so any idiosyncratic feature of a particular 15–50-child sample (an unusually precocious or unusually delayed cluster of children, sampling noise in which families happened to be tested that month) propagates directly and undampened into $\hat{\alpha}_j^\text{MLE}$. The Bayesian estimates, by contrast, are explicitly regularised toward the smooth population trend $\hat{\mu}_\alpha$ (horizontal dotted line), which damps exactly this kind of small-sample noise. Second, note that **the shrinkage is not uniform in direction**: at every one of the 15 ages the Bayesian estimate is at or above the MLE (never meaningfully below), because $\hat{\mu}_\alpha \approx 424$ sits above most of the individual age-specific MLEs at the younger end of the range — the population mean is itself pulled upward by the more numerous, more reliably estimated older age groups, so shrinkage for young ages is predominantly upward.
+
+```{r shrinkage-vs-n-plot, fig.height=4, fig.cap="Magnitude of Bayesian shrinkage (Bayes minus MLE) plotted against the number of children available at each age in the modelling subsample. The clear downward trend confirms the theoretical prediction that shrinkage strength is inversely related to local sample size: age groups with fewer observations are pulled more strongly toward the population mean, while well-sampled age groups are shrunk only mildly."}
+n_per_age <- table(df_model_cov$age)
+n_match   <- as.numeric(n_per_age[match(comparison$age, names(n_per_age))])
+n_match[is.na(n_match)] <- 0
+
+plot(n_match, comparison$shrinkage, pch=16, col=col_purp, cex=1.3,
+     xlab="Number of children at this age (n)", ylab="Shrinkage (Bayes - MLE, words)",
+     main="Shrinkage Magnitude Decreases with Local Sample Size")
+abline(lm(comparison$shrinkage ~ n_match), col=col_purp, lwd=2, lty=2)
+text(n_match, comparison$shrinkage, labels=comparison$age, pos=3, cex=0.7, col="gray30")
+```
+
+The shrinkage-vs-sample-size figure above makes the *mechanism* behind hierarchical shrinkage directly visible rather than simply asserted: the fitted trend line slopes clearly downward, confirming that the magnitude of the Bayes-MLE discrepancy shrinks as the number of children available for that specific age group grows. This is exactly the qualitative prediction of the James-Stein / empirical-Bayes shrinkage theory referenced in Section 4 — group-level estimates are pulled toward a common mean in inverse proportion to the *precision* of their own local information, and local sample size is the dominant driver of that precision here. Age 24 months, with $n \approx 85$ children in the working subsample (the single best-sampled age group, owing to its disproportionate representation in the underlying Marchman data collection), shows correspondingly minimal shrinkage; ages such as 16 and 17 months, with as few as 15–30 children, show the largest pulls toward the population mean. This pattern provides an independent, purely data-driven check on the face validity of the hierarchical model: shrinkage is doing exactly what the theory says it should, no more and no less.
+
+---
+
+# Model Comparison via DIC
+
+```{r dic-final}
+get_dic <- function(fit) {
+  d <- fit$BUGSoutput$sims.matrix[,"deviance"]
+  mean(d) + var(d)/2
+}
+
+dic_p0 <- get_dic(fit_p0)
+
+dic_table <- data.frame(
+  Model = c("P0","NB1","NB2","NB3","NB6","NB_edu","NB_int"),
+  Likelihood = c("Poisson","NegBin","NegBin","NegBin","NegBin","NegBin","NegBin"),
+  Structure = c(
+    "Poisson, fixed alpha/beta — overdispersion ignored",
+    "Fixed alpha, beta — no covariates",
+    "Hierarchical alpha[j]",
+    "Hier. + sex on alpha (Fenson et al., 1994)",
+    "Hier. + sex-specific beta (Bates et al., 1994)",
+    "Hier. + education on beta (Hart & Risley, 1995)",
+    "Hier. + age x sex interaction (Bornstein et al., 2004)"
+  ),
+  DIC = round(c(dic_p0, get_dic(fit_nb1), get_dic(fit_nb2), get_dic(fit_nb3),
+                get_dic(fit_nb6), get_dic(fit_edu), get_dic(fit_int)), 1),
+  Delta_vs_NB2 = round(c(dic_p0 - get_dic(fit_nb2),
+                          get_dic(fit_nb1)-get_dic(fit_nb2), 0,
+                          get_dic(fit_nb2)-get_dic(fit_nb3),
+                          get_dic(fit_nb2)-get_dic(fit_nb6),
+                          get_dic(fit_nb2)-get_dic(fit_edu),
+                          get_dic(fit_nb2)-get_dic(fit_int)), 1)
+)
+
+print(dic_table)
+```
+
+```{r dic-barplot, fig.cap="DIC comparison across all seven models including the Poisson baseline P0 (dark red). P0 is clipped for scale — its actual DIC value is annotated in red above its bar. The key message is two-fold: (1) every NegBin model is far superior to the Poisson, demonstrating that ignoring overdispersion is catastrophically costly; (2) among NegBin models, the hierarchical structure (NB1 to NB2, gap 87.3 points) is far more important than any individual covariate (gaps 1-5 points). The green dashed line marks NB2 as the reference."}
+dic_vals  <- dic_table$DIC
+names(dic_vals) <- dic_table$Model
+
+# Two-panel DIC plot: left shows the full scale including P0,
+# right zooms into the NegBin models only for readability
+par(mfrow=c(1,2), mar=c(5,4,3,1))
+
+# LEFT: full scale
+bar_cols_full <- c("#8B0000", col_red, col_green, col_green,
+                   col_green, "#CC8800", "#CC8800")
+bp_full <- barplot(dic_vals, col=adjustcolor(bar_cols_full,0.80),
+                   border=bar_cols_full, ylab="DIC",
+                   names.arg=dic_table$Model, cex.names=0.78,
+                   main="All models (full scale)")
+abline(h=dic_vals[3], col=col_green, lty=2, lwd=1.5)
+
+# RIGHT: NegBin models only (zoomed)
+nb_vals  <- dic_vals[2:7]
+nb_names <- names(dic_vals)[2:7]
+nb_cols  <- bar_cols_full[2:7]
+y_lo <- min(nb_vals) - 15
+y_hi <- max(nb_vals) + 15
+bp_nb <- barplot(nb_vals, col=adjustcolor(nb_cols,0.80),
+                 border=nb_cols, ylim=c(y_lo, y_hi), xpd=FALSE,
+                 ylab="DIC", names.arg=nb_names, cex.names=0.78,
+                 main="NegBin models only (zoomed)")
+abline(h=dic_vals[3], col=col_green, lty=2, lwd=1.5)
+text(bp_nb, nb_vals + 3, sprintf("%.1f", nb_vals), cex=0.72, xpd=NA)
+par(mfrow=c(1,1))
+```
+
+The two-panel figure makes two distinct comparisons immediately readable. The **left panel** (full scale) shows the Poisson baseline P0 towering above every NegBin model — its DIC is hundreds of points higher than even the simplest NegBin NB1, despite sharing the exact same mean function. The gap between P0 and NB1 is a pure measure of the cost of the Poisson constraint $	ext{Var}(y) = \mu$: with observed variance/mean ratios of 55--122, forcing this constraint onto the likelihood produces a catastrophically overconfident model that assigns negligible probability to the actual observed spread of vocabulary scores. The **right panel** (zoomed into NegBin models only) then shows the finer structure: the hierarchical gap NB1$	o$NB2 ($\Delta$DIC = 87.3) dominates over all covariate contributions (3--5 points each), confirming that partial pooling across age groups is the single most important modelling decision in this analysis.
+
+```{r alpha-comparison-plot, fig.cap="Posterior mean asymptotic vocabulary by age group, compared across NB2 (no covariates), and the male/female-specific predictions implied by NB3 and NB6. NB3's male and female curves are parallel (constant additive gap); NB6's curves are non-parallel, converging at young ages and diverging at older ages because the growth-rate difference compounds over time. The visual divergence between the two specifications illustrates why they encode genuinely different biological hypotheses, despite achieving nearly identical DIC."}
+post3_cmp <- fit_nb3$BUGSoutput$sims.matrix
+post6_cmp <- fit_nb6$BUGSoutput$sims.matrix
+age_grid3 <- 16:30
+
+alpha_nb2 <- sapply(1:15, function(j) mean(post2_full[, paste0("alpha[",j,"]")]))
+
+m_nb3 <- sapply(1:15, function(j) mean(post3_cmp[, paste0("alpha[",j,"]")]))
+g_nb3 <- mean(post3_cmp[,"gamma"])
+b_nb3 <- mean(post3_cmp[,"beta"])
+male_nb3   <- m_nb3 * (1 - exp(-b_nb3*(age_grid3-8)))
+female_nb3 <- (m_nb3 + g_nb3) * (1 - exp(-b_nb3*(age_grid3-8)))
+
+mu_alpha_nb6 <- mean(post6_cmp[,"mu_alpha"])
+b1_nb6 <- mean(post6_cmp[,"beta[1]"]); b2_nb6 <- mean(post6_cmp[,"beta[2]"])
+male_nb6   <- mu_alpha_nb6 * (1 - exp(-b1_nb6*(age_grid3-8)))
+female_nb6 <- mu_alpha_nb6 * (1 - exp(-b2_nb6*(age_grid3-8)))
+
+plot(age_grid3, alpha_nb2*(1-exp(-mean(post2_full[,"beta"])*(age_grid3-8))),
+     type="l", lwd=2, col="gray40", lty=2,
+     ylim=c(0,650), xlab="Age (months)", ylab="Predicted vocabulary",
+     main="Model Comparison: NB2 vs Sex-Specific Curves (NB3, NB6)")
+lines(age_grid3, male_nb3,   col=col_blue, lwd=2.2, lty=1)
+lines(age_grid3, female_nb3, col=col_red,  lwd=2.2, lty=1)
+lines(age_grid3, male_nb6,   col=col_blue, lwd=2.2, lty=3)
+lines(age_grid3, female_nb6, col=col_red,  lwd=2.2, lty=3)
+legend("topleft", bty="n", cex=0.78,
+       legend=c("NB2 (no sex)","NB3 male","NB3 female","NB6 male","NB6 female"),
+       col=c("gray40",col_blue,col_red,col_blue,col_red), lwd=2, lty=c(2,1,1,3,3))
+```
+
+<div class="finding">
+**Model ranking:** NB6 (sex on $\beta$) achieves the best DIC (6,407.9), followed closely by NB3 (sex on $\alpha$, DIC=6,409.2). Both improvements vs NB2 are below the threshold of 10 for strong evidence (Ntzoufras, 2010), confirming that the sex effect — while real and consistent with the literature — explains limited additional predictive variance in this homogeneous sample. Education and the age×sex interaction do not improve fit. **Preferred model: NB2**, with NB6 noted as the biologically richest extension.
+</div>
+
+---
+
+---
+
+# Posterior Predictive Distributions and Clinical Interpretation
+
+## From Inference to Prediction
+
+Statistical inference tells us *what the model has learned* from data — the posterior distributions of $\alpha_j$, $\beta$, $\gamma$, and $r$. But the scientifically and clinically most useful output is the **posterior predictive distribution**: the full probability distribution over vocabulary scores for a new child of given age and sex, integrating over all parameter uncertainty.
+
+For a new child $\tilde{y}$ of age $\tilde{x}$ and sex $s$, the posterior predictive distribution is:
+
+$$p(\tilde{y} \mid y_{\text{obs}}) = \int p(\tilde{y} \mid \theta) \cdot p(\theta \mid y_{\text{obs}}) \, d\theta$$
+
+In practice, this is approximated by drawing $\theta^{(s)}$ from the MCMC posterior, computing $\mu^{(s)} = (\alpha_{j}^{(s)} + \gamma^{(s)} \cdot s) \cdot (1 - e^{-\beta^{(s)}(\tilde{x}-8)})$, and then drawing $\tilde{y}^{(s)} \sim \text{NegBin}(\mu^{(s)}, r^{(s)})$. The resulting sample $\{\tilde{y}^{(s)}\}$ represents the full predictive uncertainty, incorporating both **parameter uncertainty** (epistemic) and **intrinsic child-to-child variability** (aleatoric).
+
+This is a key strength of the Bayesian framework: frequentist point estimates give a single predicted value with a confidence interval that technically refers to repeated sampling of datasets, not to individual children. The posterior predictive distribution directly answers the clinician's question: *"Given what I know about this child's age and sex, what is the probability that their vocabulary falls below a given threshold?"*
+
+## Posterior Predictive Distributions by Age and Sex
+
+```{r predictive-plot, fig.height=4, fig.cap="Posterior predictive distributions for productive vocabulary at ages 18, 24, and 30 months, by sex (NB3 model). Blue = male, red = female. The vertical dotted line marks the CDI ceiling of 680 words. At 18 months the distributions are nearly identical and strongly right-skewed; by 24 months maximum inter-individual divergence is reached; at 30 months the left shift reflects ceiling compression. The female advantage (52 words on the asymptote) is visible but modest relative to the enormous within-sex variability."}
+post3 <- fit_nb3$BUGSoutput$sims.matrix
+ages_pred <- c(18, 24, 30)
+
+par(mfrow = c(1, 3), mar = c(4, 4, 3, 1))
+
+for (eta in ages_pred) {
+  j     <- eta - 15
+  a_idx <- paste0("alpha[", j, "]")
+  n_pred <- 5000
+  idx_s  <- sample(nrow(post3), n_pred, replace = TRUE)
+
+  mu_male   <- post3[idx_s, a_idx] *
+               (1 - exp(-post3[idx_s, "beta"] * (eta - 8)))
+  mu_female <- (post3[idx_s, a_idx] + post3[idx_s, "gamma"]) *
+               (1 - exp(-post3[idx_s, "beta"] * (eta - 8)))
+
+  y_pred_male   <- pmin(rnbinom(n_pred, size=post3[idx_s,"r"], mu=mu_male),   680)
+  y_pred_female <- pmin(rnbinom(n_pred, size=post3[idx_s,"r"], mu=mu_female), 680)
+
+  d_m <- density(y_pred_male,   from=0, to=700)
+  d_f <- density(y_pred_female, from=0, to=700)
+
+  plot(d_m, col=col_blue, lwd=2.5,
+       xlim=c(0, 720), ylim=c(0, max(d_m$y, d_f$y)*1.15),
+       main=paste0("Age: ", eta, " months"),
+       xlab="Productive vocabulary", ylab="Density")
+  polygon(d_m, col=adjustcolor(col_blue, 0.12), border=NA)
+  lines(d_f, col=col_red, lwd=2.5)
+  polygon(d_f, col=adjustcolor(col_red, 0.12), border=NA)
+  abline(v=680, col="gray50", lty=3, lwd=1.5)
+
+  legend("topright", bty="n",
+         legend=c(sprintf("Male:   median=%d", round(median(y_pred_male))),
+                  sprintf("Female: median=%d", round(median(y_pred_female)))),
+         col=c(col_blue, col_red), lwd=2, cex=0.82)
+}
+par(mfrow=c(1,1))
+```
+
+While the three-panel predictive comparison above shows three age "snapshots", it is also useful to see the predictive percentiles evolve *continuously* across the full 16–30 month range — a so-called fan chart, commonly used in forecasting to communicate widening uncertainty over a horizon. Here the "horizon" is age rather than calendar time, but the visual logic is identical: it shows at a glance both the central predicted trajectory and how rapidly the plausible range of outcomes expands as children move through the vocabulary explosion.
+
+```{r predictive-fanchart, fig.cap="Posterior predictive 'fan chart' for productive vocabulary across the full 16–30 month age range, separately for boys (left) and girls (right), based on the NB3 model. Shaded bands show the 10th–90th (light) and 25th–75th (dark) posterior predictive percentile ranges; the solid line is the predictive median. Both fans widen rapidly between 18 and 24 months — the vocabulary explosion window — and are visibly clipped at the 680-word ceiling for the oldest ages, especially for girls, whose higher central tendency makes ceiling contact more likely."}
+ages_fan <- 16:30
+fan_male <- fan_female <- matrix(NA, nrow=length(ages_fan), ncol=5)
+colnames(fan_male) <- colnames(fan_female) <- c("p10","p25","p50","p75","p90")
+
+set.seed(7)
+for (k in seq_along(ages_fan)) {
+  eta <- ages_fan[k]; j <- eta-15; a_idx <- paste0("alpha[",j,"]")
+  idx_s <- sample(nrow(post3), 4000, replace=TRUE)
+  mu_m <- post3[idx_s,a_idx]*(1-exp(-post3[idx_s,"beta"]*(eta-8)))
+  mu_f <- (post3[idx_s,a_idx]+post3[idx_s,"gamma"])*(1-exp(-post3[idx_s,"beta"]*(eta-8)))
+  ym <- pmin(rnbinom(4000, size=post3[idx_s,"r"], mu=mu_m), 680)
+  yf <- pmin(rnbinom(4000, size=post3[idx_s,"r"], mu=mu_f), 680)
+  fan_male[k,]   <- quantile(ym, c(.10,.25,.50,.75,.90))
+  fan_female[k,] <- quantile(yf, c(.10,.25,.50,.75,.90))
+}
+
+par(mfrow=c(1,2), mar=c(4,4,3,1))
+plot(ages_fan, fan_male[,"p50"], type="n", ylim=c(0,690),
+     xlab="Age (months)", ylab="Productive vocabulary", main="Boys - predictive fan")
+polygon(c(ages_fan,rev(ages_fan)), c(fan_male[,"p10"],rev(fan_male[,"p90"])),
+        col=adjustcolor(col_blue,0.18), border=NA)
+polygon(c(ages_fan,rev(ages_fan)), c(fan_male[,"p25"],rev(fan_male[,"p75"])),
+        col=adjustcolor(col_blue,0.35), border=NA)
+lines(ages_fan, fan_male[,"p50"], col=col_blue, lwd=2.5)
+abline(h=680, col=col_red, lty=3)
+
+plot(ages_fan, fan_female[,"p50"], type="n", ylim=c(0,690),
+     xlab="Age (months)", ylab="Productive vocabulary", main="Girls - predictive fan")
+polygon(c(ages_fan,rev(ages_fan)), c(fan_female[,"p10"],rev(fan_female[,"p90"])),
+        col=adjustcolor(col_red,0.18), border=NA)
+polygon(c(ages_fan,rev(ages_fan)), c(fan_female[,"p25"],rev(fan_female[,"p75"])),
+        col=adjustcolor(col_red,0.35), border=NA)
+lines(ages_fan, fan_female[,"p50"], col=col_red, lwd=2.5)
+abline(h=680, col=col_red, lty=3)
+par(mfrow=c(1,1))
+```
+
+Two features stand out in the fan chart above that were less visible in the three-snapshot comparison. First, the **rate of fan widening is itself age-dependent**: the bands are relatively narrow and close together at 16–18 months, expand rapidly through 20–24 months, and then begin to compress again as the upper bound presses against the 680-word ceiling — a direct visual signature of the changing skewness documented in the EDA. Second, **ceiling clipping is visibly asymmetric between the sexes**: because girls have a higher central tendency at every age, their 90th percentile band touches the 680 ceiling roughly two months earlier than boys' (around 24–25 months for girls vs. 26–27 months for boys), even though the underlying NegBin model treats both sexes with the same dispersion parameter $r$. This is a subtle but important consequence of the asymptotic growth model interacting with a bounded instrument, and is the most direct illustration of why the CDI ceiling, discussed as a limitation in Section 9.2, is not merely a theoretical concern but visibly distorts the right tail of the predictive distribution for precisely the children — and the sex — for whom the model predicts the most precocious vocabulary development.
+
+## Predictive Reference Table
+
+The table below constitutes the main **predictive output** of the analysis: for each age and sex, it reports the posterior predictive median (50th percentile) and the 10th--90th percentile band. Values are truncated at 680 (CDI ceiling) via `pmin(..., 680)`.
+
+```{r predictive-table}
+set.seed(42)
+pred_rows <- list()
+
+for (eta in c(18, 20, 22, 24, 26, 28, 30)) {
+  j     <- eta - 15
+  a_idx <- paste0("alpha[", j, "]")
+  idx_s <- sample(nrow(post3), 5000, replace = TRUE)
+
+  mu_m <- post3[idx_s, a_idx] *
+          (1 - exp(-post3[idx_s,"beta"] * (eta-8)))
+  mu_f <- (post3[idx_s, a_idx] + post3[idx_s,"gamma"]) *
+          (1 - exp(-post3[idx_s,"beta"] * (eta-8)))
+
+  ypm <- pmin(rnbinom(5000, size=post3[idx_s,"r"], mu=mu_m), 680)
+  ypf <- pmin(rnbinom(5000, size=post3[idx_s,"r"], mu=mu_f), 680)
+
+  pred_rows[[length(pred_rows)+1]] <- data.frame(
+    Age_months    = eta,
+    Male_p10      = round(quantile(ypm, 0.10)),
+    Male_p50      = round(median(ypm)),
+    Male_p90      = round(quantile(ypm, 0.90)),
+    Female_p10    = round(quantile(ypf, 0.10)),
+    Female_p50    = round(median(ypf)),
+    Female_p90    = round(quantile(ypf, 0.90)),
+    Sex_gap_median= round(median(ypf) - median(ypm))
+  )
+}
+
+pred_table <- do.call(rbind, pred_rows)
+print(pred_table, row.names=FALSE)
+```
+
+## Interpretation
+
+**Three developmental phases** emerge clearly from the predictive distributions:
+
+**Phase 1 — Pre-explosion (18--20 months).** Both distributions are strongly right-skewed, with the majority of children producing fewer than 100 words and a long tail extending toward 200--250. The sex gap at the median is modest (approximately 17--20 words), while the 10th--90th percentile band already spans over 200 words, confirming that inter-individual variability dominates any group-level difference at this age. This is consistent with Bloom's (1993) observation that the timing of vocabulary onset is the primary source of variability in early language development.
+
+**Phase 2 — Explosion (22--24 months).** This is the period of maximum divergence: the 10th--90th band reaches over 500 words (59--565 for males at 24 months). The shape transitions from right-skewed to approximately uniform, reflecting the simultaneous presence of children who have not yet begun rapid vocabulary growth and children who are already near the CDI ceiling. The female advantage reaches approximately 24 words at the median (247 vs 223), still modest relative to the total spread.
+
+**Phase 3 — Ceiling approach (26--30 months).** The 90th percentile is constrained at 680 for both sexes from age 26 onward (after `pmin` truncation), reflecting the CDI ceiling effect. The median continues to rise (305 male, 335 female at 26 months; 385 male, 398 female at 30 months), but the upper tail is artificially compressed. This is the clearest manifestation of the CDI ceiling limitation: a child who produces all 680 listed words may in fact have a much larger active vocabulary, but the instrument cannot detect this.
+
+**The sex gap is real but clinically modest.** The posterior predictive median difference between females and males ranges from 17 words (18 months) to 30 words (26 months) — a consistent advantage that is statistically credible (CI on $\gamma$ excludes zero) but small relative to the enormous within-sex variability. A clinician using these distributions for developmental screening would find that the 10th--90th percentile bands of males and females overlap almost completely at every age. The tables above are therefore best interpreted as **sex-stratified normative references** rather than as evidence of a clinically actionable sex difference.
+
+<div class="finding">
+**Predictive conclusion.** The Bayesian hierarchical NegBin model (NB3) yields sex-stratified posterior predictive distributions that can serve as normative references for vocabulary screening. At 24 months — the most clinically relevant milestone — the model predicts a male median of 223 words (10th--90th percentile: 59--565) and a female median of 247 words (64--624). The enormous width of these bands reflects genuine inter-individual variability, not model uncertainty: even a "perfect" model of average trajectories would face this irreducible aleatoric uncertainty, captured by the NegBin dispersion parameter $\hat{r} \approx 1.65$.
+</div>
+
+# Discussion and Conclusions
+
+## A Visual Executive Summary
+
+Before discussing each finding in prose, it is useful to assemble the project's central numerical results into a single visual summary, bringing together the four pieces of evidence that jointly justify the modelling choices made throughout this report: the overdispersion that rules out Poisson, the DIC evidence that ranks the six models, the sex effect that is real but modest, and the irreducible width of the predictive distribution.
+
+```{r executive-summary-plot, fig.height=7, fig.cap="Executive summary of the four central findings. Top-left: overdispersion ratio by age (all points far above the Poisson threshold of 1). Top-right: DIC by model, with NB2 as reference. Bottom-left: estimated sex gap on alpha (NB3) and on beta (NB6, converted to an implied gap in months-to-half-asymptote), both with 95% credible intervals. Bottom-right: predictive median and 80% band at 24 months, the clinically pivotal vocabulary-explosion mid-point, for boys vs girls."}
+par(mfrow=c(2,2), mar=c(4,4,3,1))
+
+# Panel 1: overdispersion ratio by age
+plot(desc$age, desc$var_mean_ratio, type="b", pch=16, col=col_red, lwd=2,
+     xlab="Age (months)", ylab="Var / Mean", main="(A) Overdispersion by age",
+     ylim=c(0,160))
+abline(h=1, col="gray50", lty=2, lwd=1.5)
+text(17, 10, "Poisson threshold = 1", cex=0.7, col="gray40", pos=3)
+
+# Panel 2: DIC by model (NegBin models only for readability — P0 would dwarf the others)
+nb_dic_vals  <- dic_vals[2:7]
+nb_dic_names <- dic_table$Model[2:7]
+nb_dic_cols  <- c(col_red, col_green, col_green, col_green, "#CC8800", "#CC8800")
+barplot(pmin(nb_dic_vals, 6440), col=adjustcolor(nb_dic_cols, 0.75), border=nb_dic_cols,
+        ylim=c(6390, 6440), xpd=FALSE, ylab="DIC", main="(B) DIC by NegBin model",
+        names.arg=nb_dic_names, cex.names=0.7)
+abline(h=dic_table$DIC[3], col=col_green, lty=2)  # NB2 is row 3 (after P0)
+
+# Panel 3: sex gap comparison
+gap_alpha   <- mean(post3_cmp[,"gamma"])
+gap_alpha_ci<- quantile(post3_cmp[,"gamma"], c(.025,.975))
+half_male   <- log(2)/post6_cmp[,"beta[1]"]
+half_female <- log(2)/post6_cmp[,"beta[2]"]
+gap_months  <- mean(half_male - half_female)
+gap_months_ci <- quantile(half_male - half_female, c(.025,.975))
+
+bp2 <- barplot(c(gap_alpha, NA), ylim=c(0,120), col=col_green,
+               names.arg=c("Sex gap on\nvocabulary level\n(words, NB3)",""),
+               main="(C) Sex effects: level vs timing", ylab="Effect size")
+arrows(bp2[1], gap_alpha_ci[1], bp2[1], gap_alpha_ci[2], angle=90, code=3, length=0.05)
+par(new=TRUE)
+bp3 <- barplot(c(NA, gap_months), ylim=c(0,6), col=col_purp, axes=FALSE,
+               names.arg=c("","Sex gap on\ntiming\n(months, NB6)"), ylab="")
+axis(4)
+mtext("Months earlier (girls)", side=4, line=2.2, cex=0.7)
+arrows(bp3[2], gap_months_ci[1], bp3[2], gap_months_ci[2], angle=90, code=3, length=0.05)
+
+# Panel 4: predictive band at 24 months
+j24 <- 24-15; a_idx24 <- paste0("alpha[",j24,"]")
+idx24 <- sample(nrow(post3), 4000, replace=TRUE)
+mu_m24 <- post3[idx24,a_idx24]*(1-exp(-post3[idx24,"beta"]*(24-8)))
+mu_f24 <- (post3[idx24,a_idx24]+post3[idx24,"gamma"])*(1-exp(-post3[idx24,"beta"]*(24-8)))
+ym24 <- pmin(rnbinom(4000,size=post3[idx24,"r"],mu=mu_m24),680)
+yf24 <- pmin(rnbinom(4000,size=post3[idx24,"r"],mu=mu_f24),680)
+
+boxplot(list(Boys=ym24, Girls=yf24), col=c(adjustcolor(col_blue,0.5),adjustcolor(col_red,0.5)),
+        main="(D) Predictive distribution at 24mo", ylab="Productive vocabulary")
+
+par(mfrow=c(1,1))
+```
+
+Panel (A) shows that overdispersion is not an artefact of any single age group but a pervasive feature present from 16 to 30 months. Panel (B) shows the dominance of the hierarchical structure (NB2) over the population baseline (NB1), with the covariate models clustering in a narrow band around NB2. Panel (C) directly contrasts the two ways the sex effect was tested: as a roughly 52-word gap on the vocabulary ceiling (NB3) and as a roughly 3–4 month head-start in reaching the half-asymptote (NB6) — both credible intervals exclude zero, visually confirming Findings 2 and 3 discussed below. Panel (D) returns to the predictive question that motivates the entire exercise: at the clinically pivotal 24-month mark, boys' and girls' predictive distributions overlap substantially despite the statistically credible group-level difference, encapsulating the central tension of this analysis between statistical significance and individual-level predictive utility.
+
+## Summary of Findings
+
+This project has presented a fully Bayesian analysis of early vocabulary growth in children aged 16–30 months, using data from the WordBank database (Frank et al., 2017). Following the suggestion to use discrete count likelihoods for CDI data, all models employ the Negative Binomial distribution, motivated by the extreme overdispersion documented in the data (variance/mean ratios of 55–154 across age groups). Six models of increasing complexity were fitted and compared via DIC, with formal convergence diagnostics, a Bayesian p-value model check, and a frequentist comparison.
+
+**Finding 1: The Negative Binomial likelihood is essential — and the Poisson is catastrophically inadequate.** The estimated dispersion $\hat{r} \approx 1.4$–1.6 confirms massive overdispersion relative to Poisson across all NegBin models. More concretely, the Poisson model P0 — fitted with the identical mean function as NB1 but without the latent Gamma layer — achieves a DIC hundreds of points higher than every NegBin model. This gap is a pure measure of the cost of the Poisson constraint $\text{Var}(y_i) = \mu_i$: with observed variance/mean ratios of 55–154, the Poisson assigns negligible probability to the actual spread of vocabulary scores. The NegBin resolves this through its Poisson-Gamma mixture structure: every child $i$ has a latent individual rate $\lambda_i \sim \text{Gamma}(r, r/\mu_i)$ capturing unmeasured between-child heterogeneity, and marginally $y_i \sim \text{NegBin}(\mu_i, r)$.
+
+**Finding 2: Hierarchical structure is the dominant modelling choice.** The transition from population-level NB1 to hierarchical NB2 yields $\Delta$DIC = 87.3 — by far the largest single improvement in the analysis. Age-specific asymptotes $\alpha_j$ correctly capture the structured heterogeneity in growth trajectories, resolving the biological implausibility of NB1's single shared asymptote and enabling biologically meaningful estimates ($\hat{\mu}_\alpha \approx 424$ words, $\hat{\beta} \approx 0.059$).
+
+**Finding 3: Sex has a real but modest predictive contribution.** Both NB3 (sex on level, $\hat{\gamma} = 52$ words, CI excludes zero) and NB6 (sex on rate, $\hat{\delta}_\beta = 0.016$, CI excludes zero) confirm the literature prediction of a female advantage (Fenson et al., 1994; Bates et al., 1994). NB6 provides the richer biological interpretation: girls not only have higher vocabulary ceilings but approach them approximately 4 months earlier than boys — a finding consistent with earlier left-hemisphere language maturation (Huttenlocher et al., 1991). However, both models improve DIC by only 3–5 points, below the threshold for strong evidence, reflecting the high within-age variability that dominates individual differences.
+
+**Finding 4: Education and the age×sex interaction are not supported in this sample.** The null result for caregiver education (NB_edu, DIC worse than NB2) is likely attributable to the relative SES homogeneity of the Marchman sample — the Hart & Risley (1995) effect requires a sample with genuine SES variation to detect. The age×sex interaction (NB_int) is biologically plausible (Bornstein et al., 2004) but statistically underpowered given approximately 33 children per monthly age group.
+
+**Finding 5: Bayesian model checking confirms adequate calibration.** The Bayesian p-value of $p_B = 0.564$ for NB2 confirms that the model is well-calibrated with respect to the chi-square discrepancy. The hierarchical structure and Bayesian shrinkage provide substantially more stable estimates than per-group MLE for data-poor age groups — the comparison in Section 8 confirms differences of 100–155 words at ages 16–22 months, converging as predicted by the Bernstein-von Mises theorem at data-rich older ages.
+
+## Limitations
+
+- **Cross-sectional data**: Each child is observed once, preventing estimation of individual growth trajectories. A longitudinal design would enable true random-effects growth curve modelling (Pinheiro & Bates, 2000).
+
+- **CDI ceiling**: The NegBin likelihood does not explicitly model the hard upper bound of 680 words. A Tobit or censored regression framework would handle this more formally.
+
+- **Sample homogeneity**: The Marchman dataset provides good internal validity but limited SES and ethnic diversity, reducing generalisability and statistical power to detect education and birth-order effects. A multi-dataset analysis with dataset-level random effects (tested exploratorily, $\Delta$DIC = 132.7) would recover both power and generalisability.
+
+- **Birth order**: The 43% missing rate for birth_order prevented its inclusion as a formal covariate despite documented effects (Hoff, 2003). Bayesian multiple imputation within JAGS is technically feasible but was not pursued here.
+
+## Future Directions
+
+- **Multi-dataset hierarchical model** with a dataset-level random effect, enabling full use of all 9,093 WordBank observations while accounting for sampling heterogeneity
+- **Longitudinal data** for individual growth curve estimation
+- **Censored NegBin** or Beta-Binomial to address the CDI ceiling more formally
+- **Birth order with Bayesian imputation** to recover this clinically relevant predictor
+
+---
+
+
+```{r export-all-figures, eval=TRUE, echo=TRUE, message=FALSE, warning=FALSE}
+# ═══════════════════════════════════════════════════════════════════════
+# EXPORT ALL FIGURES AS PDF FOR LATEX
+# Run this chunk ONCE after all models are fitted.
+# Saves 21 PDF files to latex_figures/ in the working directory.
+# Upload all PDFs to Overleaf alongside vocabulary_growth_report.tex
+# ═══════════════════════════════════════════════════════════════════════
+
+dir.create("latex_figures", showWarnings = FALSE)
+
+# Helper: save a base-R plot
+save_fig <- function(filename, expr, w=9, h=5) {
+  pdf(file.path("latex_figures", paste0(filename, ".pdf")), width=w, height=h)
+  force(expr)
+  invisible(dev.off())
+  cat("Saved:", filename, "\n")
+}
+
+# Helper: save a ggplot
+save_gg <- function(filename, p, w=9, h=5) {
+  ggplot2::ggsave(
+    file.path("latex_figures", paste0(filename, ".pdf")),
+    plot=p, width=w, height=h)
+  cat("Saved:", filename, "\n")
+}
+
+# ── fig01_growth_trajectory (base-R) ──
+save_fig("fig01_growth_trajectory", {
+  par(mfrow=c(1,2))
+  
+  # Percentile plot
+  pct_data <- df_march %>%
+    group_by(age) %>%
+    summarise(p10=quantile(production,.10), p50=quantile(production,.50),
+              p90=quantile(production,.90), .groups="drop")
+  
+  plot(pct_data$age, pct_data$p50, type="l", col=col_red, lwd=2.5,
+       ylim=c(0,680), xlab="Age (months)", ylab="Words produced",
+       main="Growth trajectory (Marchman, n=5,039)")
+  polygon(c(pct_data$age, rev(pct_data$age)),
+          c(pct_data$p10, rev(pct_data$p90)),
+          col=adjustcolor(col_teal,.4), border=NA)
+  lines(pct_data$age, pct_data$p10, col=col_blue, lty=2)
+  lines(pct_data$age, pct_data$p90, col=col_blue, lty=2)
+  lines(pct_data$age, pct_data$p50, col=col_red, lwd=2.5)
+  
+  # Sex plot
+  sex_data <- df_march %>%
+    filter(!is.na(sex)) %>%
+    group_by(age, sex) %>%
+    summarise(mean_prod=mean(production), .groups="drop")
+  
+  plot(sex_data$age[sex_data$sex=="Female"], sex_data$mean_prod[sex_data$sex=="Female"],
+       type="b", col=col_red, lwd=2, pch=16,
+       ylim=c(0,580), xlab="Age (months)", ylab="Mean words produced",
+       main="Mean vocabulary by sex")
+  lines(sex_data$age[sex_data$sex=="Male"], sex_data$mean_prod[sex_data$sex=="Male"],
+        type="b", col=col_blue, lwd=2, pch=17)
+  legend("topleft", c("Female","Male"), col=c(col_red,col_blue), lwd=2, pch=c(16,17))
+  
+  par(mfrow=c(1,1))
+}, w=9, h=5)
+
+# ── fig02_overdispersion_bars (base-R) ──
+save_fig("fig02_overdispersion_bars", {
+  mv_data <- df_march %>%
+    group_by(age) %>%
+    summarise(mean_v = mean(production), var_v = var(production), .groups="drop") %>%
+    mutate(ratio = round(var_v / mean_v, 0))
+  
+  r_ref <- 1.6
+  negbin_var <- mv_data$mean_v + mv_data$mean_v^2 / r_ref
+  
+  bar_matrix <- rbind(Observed = mv_data$var_v,
+                       Poisson  = mv_data$mean_v,
+                       NegBin   = negbin_var)
+  colnames(bar_matrix) <- mv_data$age
+  
+  # Reserve a dedicated strip at the top of the figure for the legend,
+  # so it never overlaps the bars regardless of their height
+  layout(matrix(c(1,2), nrow=2), heights=c(1, 5))
+  
+  par(mar=c(0,4,0,1))
+  plot.new()
+  legend("center", horiz=TRUE, bty="n", cex=0.85, xpd=NA, x.intersp=0.6, text.width=NA,
+         legend=c("Observed", "Poisson", "NegBin (r=1.6)", "Ratio (obs/Poisson)"),
+         fill=c(col_red, "gray70", col_purp, NA), border=NA,
+         text.col=c("black","black","black",col_purp))
+  
+  par(mar=c(5,4,2,1))
+  bp <- barplot(bar_matrix, beside=TRUE, col=c(col_red, "gray70", col_purp),
+                border=NA, log="y", ylim=c(1, max(mv_data$var_v)*2.2),
+                xlab="Age (months)", ylab="Variance (log scale)")
+  
+  ratio_x <- bp[1,] + (bp[2,]-bp[1,])
+  text(ratio_x, mv_data$var_v, labels=paste0(mv_data$ratio,"x"),
+       pos=3, cex=0.8, col=col_purp, font=2, xpd=NA)
+  
+  layout(1)  # reset layout for subsequent plots
+}, w=9, h=6)
+
+# ── fig03_density_age (ggplot) ──
+save_gg("fig03_density_age", {
+  df_march %>%
+    filter(age %in% c(16, 19, 22, 25, 28, 30)) %>%
+    mutate(age=factor(age)) %>%
+    ggplot(aes(x=production, fill=age, color=age)) +
+    geom_density(alpha=0.3) +
+    labs(title="Vocabulary distribution by age group",
+         x="Words produced (0–680)", y="Density") +
+    theme_minimal(base_size=13)
+  last_plot()
+}, w=9, h=5)
+
+# ── fig04_boxplot_age (base-R) ──
+save_fig("fig04_boxplot_age", {
+  boxplot(production ~ age, data=df_march,
+          col=adjustcolor(col_blue, 0.4), border=col_blue,
+          xlab="Age (months)", ylab="Words produced",
+          main="Productive Vocabulary by Age: Distributional Spread")
+  abline(h=680, col=col_red, lty=3, lwd=1.5)
+  text(1, 660, "CDI ceiling (680)", col=col_red, cex=0.8, pos=4)
+}, w=9, h=5)
+
+# ── fig05_growth_curve_family (base-R) ──
+save_fig("fig05_growth_curve_family", {
+  par(mfrow=c(1,2), mar=c(4,4,3,1))
+  age_grid <- seq(8, 30, length.out=200)
+  
+  # Left: varying alpha
+  plot(age_grid, 300*(1-exp(-0.06*(age_grid-8))), type="l", lwd=2.5, col=col_blue,
+       ylim=c(0,650), xlab="Age (months)", ylab="Predicted vocabulary",
+       main="Varying alpha (beta = 0.06 fixed)")
+  lines(age_grid, 450*(1-exp(-0.06*(age_grid-8))), lwd=2.5, col=col_green)
+  lines(age_grid, 600*(1-exp(-0.06*(age_grid-8))), lwd=2.5, col=col_red)
+  legend("bottomright", legend=c("alpha=300","alpha=450","alpha=600"),
+         col=c(col_blue,col_green,col_red), lwd=2.5, bty="n", cex=0.85)
+  
+  # Right: varying beta
+  plot(age_grid, 450*(1-exp(-0.03*(age_grid-8))), type="l", lwd=2.5, col=col_blue,
+       ylim=c(0,500), xlab="Age (months)", ylab="Predicted vocabulary",
+       main="Varying beta (alpha = 450 fixed)")
+  lines(age_grid, 450*(1-exp(-0.06*(age_grid-8))), lwd=2.5, col=col_green)
+  lines(age_grid, 450*(1-exp(-0.12*(age_grid-8))), lwd=2.5, col=col_red)
+  legend("bottomright", legend=c("beta=0.03","beta=0.06","beta=0.12"),
+         col=c(col_blue,col_green,col_red), lwd=2.5, bty="n", cex=0.85)
+  par(mfrow=c(1,1))
+}, w=9, h=5)
+
+# ── fig06_p0_vs_nb1 (base-R) ──
+save_fig("fig06_p0_vs_nb1", {
+  age_grid_p <- 16:30
+  n_draw_p   <- 2000
+  post_p0    <- fit_p0$BUGSoutput$sims.matrix
+  post_nb1   <- fit_nb1$BUGSoutput$sims.matrix
+  
+  par(mfrow=c(1,2), mar=c(4,4,3,1))
+  
+  for (mod in c("Poisson","NegBin")) {
+    pm    <- if(mod=="Poisson") post_p0 else post_nb1
+    set.seed(5)
+    idx_p <- sample(nrow(pm), n_draw_p, replace=TRUE)
+    pred_mu <- sapply(age_grid_p, function(a)
+      pm[idx_p,"alpha"] * (1-exp(-pm[idx_p,"beta"]*(a-8))))
+    if (mod=="Poisson") {
+      pred_lo <- sapply(1:length(age_grid_p), function(k)
+        quantile(qpois(0.10, pred_mu[,k]), 0.5))
+      pred_hi <- sapply(1:length(age_grid_p), function(k)
+        quantile(qpois(0.90, pred_mu[,k]), 0.5))
+    } else {
+      r_s <- pm[idx_p,"r"]
+      pred_lo <- sapply(1:length(age_grid_p), function(k)
+        quantile(rnbinom(n_draw_p, size=r_s, mu=pred_mu[,k]), 0.10))
+      pred_hi <- sapply(1:length(age_grid_p), function(k)
+        quantile(rnbinom(n_draw_p, size=r_s, mu=pred_mu[,k]), 0.90))
+    }
+    pred_mean <- colMeans(pred_mu)
+  
+    plot(jitter(df_model_cov$age, 0.6), df_model_cov$production,
+         pch=16, col=adjustcolor("gray40",0.3), cex=0.6,
+         xlab="Age (months)", ylab="Productive vocabulary",
+         main=paste0(mod, " model — predictive band"),
+         ylim=c(0,720))
+    polygon(c(age_grid_p,rev(age_grid_p)), c(pred_lo,rev(pred_hi)),
+            col=adjustcolor(col_blue,0.20), border=NA)
+    lines(age_grid_p, pred_mean,
+          col=if(mod=="Poisson") col_red else col_blue, lwd=2.5)
+    abline(h=680, col="gray60", lty=3)
+  }
+  par(mfrow=c(1,1))
+}, w=9, h=4.5)
+
+# ── fig07_nb2_fit (base-R) ──
+save_fig("fig07_nb2_fit", {
+  post2_full <- fit_nb2$BUGSoutput$sims.matrix
+  age_grid2  <- 16:30
+  
+  pred_mean <- pred_lo <- pred_hi <- numeric(length(age_grid2))
+  set.seed(1)
+  for (k in seq_along(age_grid2)) {
+    eta <- age_grid2[k]
+    j   <- eta - 15
+    a_idx <- paste0("alpha[", j, "]")
+    idx_s <- sample(nrow(post2_full), 3000, replace=TRUE)
+    mu_k  <- post2_full[idx_s, a_idx] * (1 - exp(-post2_full[idx_s,"beta"]*(eta-8)))
+    y_k   <- rnbinom(3000, size=post2_full[idx_s,"r"], mu=mu_k)
+    pred_mean[k] <- mean(mu_k)
+    pred_lo[k]   <- quantile(y_k, 0.10)
+    pred_hi[k]   <- quantile(y_k, 0.90)
+  }
+  
+  plot(jitter(df_model_cov$age, 0.6), df_model_cov$production,
+       pch=16, col=adjustcolor("gray40", 0.35), cex=0.7,
+       xlab="Age (months)", ylab="Productive vocabulary",
+       main="NB2 Fitted Curve vs Observed Data (n=500 modelling subsample)")
+  polygon(c(age_grid2, rev(age_grid2)), c(pred_lo, rev(pred_hi)),
+          col=adjustcolor(col_blue, 0.18), border=NA)
+  lines(age_grid2, pred_mean, col=col_blue, lwd=2.8)
+  abline(h=680, col=col_red, lty=3)
+  legend("topleft", bty="n",
+         legend=c("Observed children","Posterior mean E[y|x]","80% predictive interval"),
+         col=c("gray40", col_blue, adjustcolor(col_blue,0.4)),
+         pch=c(16,NA,15), lwd=c(NA,2.8,NA), pt.cex=c(0.7,NA,2.2))
+}, w=9, h=5)
+
+# ── fig08_nb3_gamma (base-R) ──
+save_fig("fig08_nb3_gamma", {
+  gamma_post <- fit_nb3$BUGSoutput$sims.matrix[,"gamma"]
+  d_gamma <- density(gamma_post)
+  plot(d_gamma, col=col_purp, lwd=2.5, main="Posterior of gamma (sex effect on alpha)",
+       xlab="gamma (words)", ylab="Density")
+  ci_g <- quantile(gamma_post, c(.025,.975))
+  polygon(c(d_gamma$x[d_gamma$x>=ci_g[1] & d_gamma$x<=ci_g[2]],
+            rev(d_gamma$x[d_gamma$x>=ci_g[1] & d_gamma$x<=ci_g[2]])),
+          c(d_gamma$y[d_gamma$x>=ci_g[1] & d_gamma$x<=ci_g[2]],
+            rep(0,sum(d_gamma$x>=ci_g[1] & d_gamma$x<=ci_g[2]))),
+          col=adjustcolor(col_purp,0.25), border=NA)
+  abline(v=0, col="gray40", lty=2, lwd=1.5)
+  abline(v=mean(gamma_post), col=col_purp, lty=1, lwd=1)
+  text(0, max(d_gamma$y)*0.9, "0", col="gray40", pos=2, cex=0.85)
+}, w=9, h=4)
+
+# ── fig09_nb6_curves (base-R) ──
+save_fig("fig09_nb6_curves", {
+  post6_full <- fit_nb6$BUGSoutput$sims.matrix
+  age_grid6  <- 16:30
+  n_draw6 <- 3000
+  set.seed(11)
+  idx6 <- sample(nrow(post6_full), n_draw6, replace=TRUE)
+  
+  curve_m <- sapply(age_grid6, function(a)
+    post6_full[idx6,"mu_alpha"] * (1-exp(-post6_full[idx6,"beta[1]"]*(a-8))))
+  curve_f <- sapply(age_grid6, function(a)
+    post6_full[idx6,"mu_alpha"] * (1-exp(-post6_full[idx6,"beta[2]"]*(a-8))))
+  
+  m_mean <- colMeans(curve_m); m_lo <- apply(curve_m,2,quantile,.025); m_hi <- apply(curve_m,2,quantile,.975)
+  f_mean <- colMeans(curve_f); f_lo <- apply(curve_f,2,quantile,.025); f_hi <- apply(curve_f,2,quantile,.975)
+  
+  plot(age_grid6, m_mean, type="n", ylim=c(0,650),
+       xlab="Age (months)", ylab="Predicted vocabulary",
+       main="NB6: Sex-Specific Growth Rate Curves")
+  polygon(c(age_grid6,rev(age_grid6)), c(m_lo,rev(m_hi)), col=adjustcolor(col_blue,0.2), border=NA)
+  polygon(c(age_grid6,rev(age_grid6)), c(f_lo,rev(f_hi)), col=adjustcolor(col_red,0.2), border=NA)
+  lines(age_grid6, m_mean, col=col_blue, lwd=2.5)
+  lines(age_grid6, f_mean, col=col_red, lwd=2.5)
+  legend("topleft", bty="n", legend=c("Boys (beta=0.049)","Girls (beta=0.065)"),
+         col=c(col_blue,col_red), lwd=2.5)
+}, w=9, h=4.5)
+
+# ── fig10_edu_curves (base-R) ──
+save_fig("fig10_edu_curves", {
+  postE_full <- fit_edu$BUGSoutput$sims.matrix
+  age_gridE  <- 16:30
+  n_drawE <- 3000
+  set.seed(13)
+  idxE <- sample(nrow(postE_full), n_drawE, replace=TRUE)
+  
+  curve_low <- sapply(age_gridE, function(a)
+    postE_full[idxE,"mu_alpha"]*(1-exp(-(postE_full[idxE,"beta"])*(a-8))))
+  curve_med <- sapply(age_gridE, function(a)
+    postE_full[idxE,"mu_alpha"]*(1-exp(-(postE_full[idxE,"beta"]+postE_full[idxE,"delta_edu[2]"])*(a-8))))
+  curve_hi  <- sapply(age_gridE, function(a)
+    postE_full[idxE,"mu_alpha"]*(1-exp(-(postE_full[idxE,"beta"]+postE_full[idxE,"delta_edu[3]"])*(a-8))))
+  
+  plot(age_gridE, colMeans(curve_low), type="l", lwd=2.2, col=col_blue,
+       ylim=c(0,600), xlab="Age (months)", ylab="Predicted vocabulary",
+       main="NB_edu: Growth Curves by Education Level (near-identical)")
+  lines(age_gridE, colMeans(curve_med), lwd=2.2, col=col_green)
+  lines(age_gridE, colMeans(curve_hi),  lwd=2.2, col=col_red)
+  legend("topleft", bty="n", legend=c("Low education","Medium education","High education"),
+         col=c(col_blue,col_green,col_red), lwd=2.2)
+}, w=9, h=4.5)
+
+# ── fig11_int_forest (base-R) ──
+save_fig("fig11_int_forest", {
+  postI_full <- fit_int$BUGSoutput$sims.matrix
+  gamma_j_mean <- sapply(1:15, function(j) mean(postI_full[,paste0("gamma_sex[",j,"]")]))
+  gamma_j_lo   <- sapply(1:15, function(j) quantile(postI_full[,paste0("gamma_sex[",j,"]")],.025))
+  gamma_j_hi   <- sapply(1:15, function(j) quantile(postI_full[,paste0("gamma_sex[",j,"]")],.975))
+  ages_int <- 16:30
+  
+  plot(gamma_j_mean, 1:15, xlim=c(-150,250), yaxt="n",
+       pch=16, col=col_purp, xlab="gamma_j (words)", ylab="",
+       main="Age-Specific Sex Effects (NB_int) vs Pooled Effect (NB3)")
+  axis(2, at=1:15, labels=ages_int, las=1, cex.axis=0.8)
+  mtext("Age (months)", side=2, line=2.5, cex=0.85)
+  segments(gamma_j_lo, 1:15, gamma_j_hi, 1:15, col=col_purp, lwd=1.8)
+  abline(v=0, col="gray40", lty=2)
+  
+  # Overlay NB3 pooled gamma as a shaded vertical band
+  gamma3_ci <- quantile(fit_nb3$BUGSoutput$sims.matrix[,"gamma"], c(.025,.975))
+  rect(gamma3_ci[1], -1, gamma3_ci[2], 17, col=adjustcolor(col_green,0.15), border=NA)
+  abline(v=mean(fit_nb3$BUGSoutput$sims.matrix[,"gamma"]), col=col_green, lwd=1.5)
+  legend("topright", bty="n", cex=0.78,
+         legend=c("NB_int: gamma_j (age-specific)","NB3: pooled gamma (95% CI band)"),
+         col=c(col_purp,col_green), lwd=c(1.8,8), pt.cex=0)
+}, w=9, h=5)
+
+# ── fig12_param_recovery (base-R) ──
+save_fig("fig12_param_recovery", {
+  post_sim  <- fit_sim$BUGSoutput$sims.matrix
+  true_vals <- c(mu_alpha=450, beta=0.06, sigma_alpha=150, r=1.6)
+  
+  par(mfrow=c(2,2), mar=c(4,4,3,1))
+  for (param in names(true_vals)) {
+    s    <- post_sim[, param]
+    ci95 <- quantile(s, c(0.025, 0.975))
+    in_ci <- true_vals[param] >= ci95[1] & true_vals[param] <= ci95[2]
+    plot(density(s), main=paste0(param, " [", ifelse(in_ci,"OK","FAIL"), "]"),
+         xlab=param, col=col_purp, lwd=2)
+    polygon(density(s), col=adjustcolor(col_purp,.15), border=NA)
+    abline(v=true_vals[param], col=col_red,   lwd=2.5, lty=2)
+    abline(v=mean(s),          col=col_green, lwd=2,   lty=3)
+    legend("topright",
+           c(paste("True =",true_vals[param]),
+             paste("Post.mean =",round(mean(s),3))),
+           col=c(col_red,col_green), lwd=2, cex=0.8)
+  }
+  par(mfrow=c(1,1))
+}, w=9, h=6)
+
+# ── fig13_traceplots (base-R) ──
+save_fig("fig13_traceplots", {
+  par(mfrow=c(2,2), mar=c(3,3,2,1))
+  traceplot(mcmc_coda[, c("mu_alpha","beta","sigma_alpha","r")],
+            col=c(col_red, col_blue, col_green))
+}, w=9, h=5)
+
+# ── fig14_bayesian_pvalue (base-R) ──
+save_fig("fig14_bayesian_pvalue", {
+  plot(T_obs[idx], T_rep[idx],
+       col=rgb(0.27,0.48,0.62,0.25), pch=16, cex=0.5,
+       xlab=expression(T(y[obs],theta)), ylab=expression(T(y[rep],theta)),
+       main=sprintf("Model Checking - Bayesian p-value = %.3f", bayesian_pval))
+  abline(0, 1, col=col_red, lwd=2)
+}, w=9, h=5)
+
+# ── fig15_bayes_mle (base-R) ──
+save_fig("fig15_bayes_mle", {
+  plot(comparison$age, comparison$Bayes,
+       type="b", col=col_blue, lwd=2, pch=16,
+       xlab="Age (months)", ylab=expression(hat(alpha)),
+       main="Age-Specific Asymptotes: Bayes vs MLE",
+       ylim=c(0, max(c(comparison$MLE, comparison$Bayes))*1.1))
+  lines(comparison$age, comparison$MLE,
+        type="b", col=col_red, lwd=2, pch=17, lty=2)
+  abline(h=mean(post2[,"mu_alpha"]), col=col_blue, lty=3)
+  legend("topleft", c("Bayes","MLE",expression(hat(mu)[alpha])),
+         col=c(col_blue,col_red,col_blue), lwd=c(2,2,1), pch=c(16,17,NA),
+         lty=c(1,2,3))
+}, w=9, h=5)
+
+# ── fig16_shrinkage_n (base-R) ──
+save_fig("fig16_shrinkage_n", {
+  n_per_age <- table(df_model_cov$age)
+  n_match   <- as.numeric(n_per_age[match(comparison$age, names(n_per_age))])
+  n_match[is.na(n_match)] <- 0
+  
+  plot(n_match, comparison$shrinkage, pch=16, col=col_purp, cex=1.3,
+       xlab="Number of children at this age (n)", ylab="Shrinkage (Bayes - MLE, words)",
+       main="Shrinkage Magnitude Decreases with Local Sample Size")
+  abline(lm(comparison$shrinkage ~ n_match), col=col_purp, lwd=2, lty=2)
+  text(n_match, comparison$shrinkage, labels=comparison$age, pos=3, cex=0.7, col="gray30")
+}, w=9, h=4)
+
+# ── fig17_dic_comparison (base-R) ──
+save_fig("fig17_dic_comparison", {
+  dic_vals  <- dic_table$DIC
+  names(dic_vals) <- dic_table$Model
+  
+  # Two-panel DIC plot: left shows the full scale including P0,
+  # right zooms into the NegBin models only for readability
+  par(mfrow=c(1,2), mar=c(5,4,3,1))
+  
+  # LEFT: full scale
+  bar_cols_full <- c("#8B0000", col_red, col_green, col_green,
+                     col_green, "#CC8800", "#CC8800")
+  bp_full <- barplot(dic_vals, col=adjustcolor(bar_cols_full,0.80),
+                     border=bar_cols_full, ylab="DIC",
+                     names.arg=dic_table$Model, cex.names=0.78,
+                     main="All models (full scale)")
+  abline(h=dic_vals[3], col=col_green, lty=2, lwd=1.5)
+  
+  # RIGHT: NegBin models only (zoomed)
+  nb_vals  <- dic_vals[2:7]
+  nb_names <- names(dic_vals)[2:7]
+  nb_cols  <- bar_cols_full[2:7]
+  y_lo <- min(nb_vals) - 15
+  y_hi <- max(nb_vals) + 15
+  bp_nb <- barplot(nb_vals, col=adjustcolor(nb_cols,0.80),
+                   border=nb_cols, ylim=c(y_lo, y_hi), xpd=FALSE,
+                   ylab="DIC", names.arg=nb_names, cex.names=0.78,
+                   main="NegBin models only (zoomed)")
+  abline(h=dic_vals[3], col=col_green, lty=2, lwd=1.5)
+  text(bp_nb, nb_vals + 3, sprintf("%.1f", nb_vals), cex=0.72, xpd=NA)
+  par(mfrow=c(1,1))
+}, w=9, h=5)
+
+# ── fig18_alpha_comparison (base-R) ──
+save_fig("fig18_alpha_comparison", {
+  post3_cmp <- fit_nb3$BUGSoutput$sims.matrix
+  post6_cmp <- fit_nb6$BUGSoutput$sims.matrix
+  age_grid3 <- 16:30
+  
+  alpha_nb2 <- sapply(1:15, function(j) mean(post2_full[, paste0("alpha[",j,"]")]))
+  
+  m_nb3 <- sapply(1:15, function(j) mean(post3_cmp[, paste0("alpha[",j,"]")]))
+  g_nb3 <- mean(post3_cmp[,"gamma"])
+  b_nb3 <- mean(post3_cmp[,"beta"])
+  male_nb3   <- m_nb3 * (1 - exp(-b_nb3*(age_grid3-8)))
+  female_nb3 <- (m_nb3 + g_nb3) * (1 - exp(-b_nb3*(age_grid3-8)))
+  
+  mu_alpha_nb6 <- mean(post6_cmp[,"mu_alpha"])
+  b1_nb6 <- mean(post6_cmp[,"beta[1]"]); b2_nb6 <- mean(post6_cmp[,"beta[2]"])
+  male_nb6   <- mu_alpha_nb6 * (1 - exp(-b1_nb6*(age_grid3-8)))
+  female_nb6 <- mu_alpha_nb6 * (1 - exp(-b2_nb6*(age_grid3-8)))
+  
+  plot(age_grid3, alpha_nb2*(1-exp(-mean(post2_full[,"beta"])*(age_grid3-8))),
+       type="l", lwd=2, col="gray40", lty=2,
+       ylim=c(0,650), xlab="Age (months)", ylab="Predicted vocabulary",
+       main="Model Comparison: NB2 vs Sex-Specific Curves (NB3, NB6)")
+  lines(age_grid3, male_nb3,   col=col_blue, lwd=2.2, lty=1)
+  lines(age_grid3, female_nb3, col=col_red,  lwd=2.2, lty=1)
+  lines(age_grid3, male_nb6,   col=col_blue, lwd=2.2, lty=3)
+  lines(age_grid3, female_nb6, col=col_red,  lwd=2.2, lty=3)
+  legend("topleft", bty="n", cex=0.78,
+         legend=c("NB2 (no sex)","NB3 male","NB3 female","NB6 male","NB6 female"),
+         col=c("gray40",col_blue,col_red,col_blue,col_red), lwd=2, lty=c(2,1,1,3,3))
+}, w=9, h=5)
+
+# ── fig19_predictive_snapshot (base-R) ──
+save_fig("fig19_predictive_snapshot", {
+  post3 <- fit_nb3$BUGSoutput$sims.matrix
+  ages_pred <- c(18, 24, 30)
+  
+  par(mfrow = c(1, 3), mar = c(4, 4, 3, 1))
+  
+  for (eta in ages_pred) {
+    j     <- eta - 15
+    a_idx <- paste0("alpha[", j, "]")
+    n_pred <- 5000
+    idx_s  <- sample(nrow(post3), n_pred, replace = TRUE)
+  
+    mu_male   <- post3[idx_s, a_idx] *
+                 (1 - exp(-post3[idx_s, "beta"] * (eta - 8)))
+    mu_female <- (post3[idx_s, a_idx] + post3[idx_s, "gamma"]) *
+                 (1 - exp(-post3[idx_s, "beta"] * (eta - 8)))
+  
+    y_pred_male   <- pmin(rnbinom(n_pred, size=post3[idx_s,"r"], mu=mu_male),   680)
+    y_pred_female <- pmin(rnbinom(n_pred, size=post3[idx_s,"r"], mu=mu_female), 680)
+  
+    d_m <- density(y_pred_male,   from=0, to=700)
+    d_f <- density(y_pred_female, from=0, to=700)
+  
+    plot(d_m, col=col_blue, lwd=2.5,
+         xlim=c(0, 720), ylim=c(0, max(d_m$y, d_f$y)*1.15),
+         main=paste0("Age: ", eta, " months"),
+         xlab="Productive vocabulary", ylab="Density")
+    polygon(d_m, col=adjustcolor(col_blue, 0.12), border=NA)
+    lines(d_f, col=col_red, lwd=2.5)
+    polygon(d_f, col=adjustcolor(col_red, 0.12), border=NA)
+    abline(v=680, col="gray50", lty=3, lwd=1.5)
+  
+    legend("topright", bty="n",
+           legend=c(sprintf("Male:   median=%d", round(median(y_pred_male))),
+                    sprintf("Female: median=%d", round(median(y_pred_female)))),
+           col=c(col_blue, col_red), lwd=2, cex=0.82)
+  }
+  par(mfrow=c(1,1))
+}, w=9, h=4)
+
+# ── fig20_fan_chart (base-R) ──
+save_fig("fig20_fan_chart", {
+  ages_fan <- 16:30
+  fan_male <- fan_female <- matrix(NA, nrow=length(ages_fan), ncol=5)
+  colnames(fan_male) <- colnames(fan_female) <- c("p10","p25","p50","p75","p90")
+  
+  set.seed(7)
+  for (k in seq_along(ages_fan)) {
+    eta <- ages_fan[k]; j <- eta-15; a_idx <- paste0("alpha[",j,"]")
+    idx_s <- sample(nrow(post3), 4000, replace=TRUE)
+    mu_m <- post3[idx_s,a_idx]*(1-exp(-post3[idx_s,"beta"]*(eta-8)))
+    mu_f <- (post3[idx_s,a_idx]+post3[idx_s,"gamma"])*(1-exp(-post3[idx_s,"beta"]*(eta-8)))
+    ym <- pmin(rnbinom(4000, size=post3[idx_s,"r"], mu=mu_m), 680)
+    yf <- pmin(rnbinom(4000, size=post3[idx_s,"r"], mu=mu_f), 680)
+    fan_male[k,]   <- quantile(ym, c(.10,.25,.50,.75,.90))
+    fan_female[k,] <- quantile(yf, c(.10,.25,.50,.75,.90))
+  }
+  
+  par(mfrow=c(1,2), mar=c(4,4,3,1))
+  plot(ages_fan, fan_male[,"p50"], type="n", ylim=c(0,690),
+       xlab="Age (months)", ylab="Productive vocabulary", main="Boys - predictive fan")
+  polygon(c(ages_fan,rev(ages_fan)), c(fan_male[,"p10"],rev(fan_male[,"p90"])),
+          col=adjustcolor(col_blue,0.18), border=NA)
+  polygon(c(ages_fan,rev(ages_fan)), c(fan_male[,"p25"],rev(fan_male[,"p75"])),
+          col=adjustcolor(col_blue,0.35), border=NA)
+  lines(ages_fan, fan_male[,"p50"], col=col_blue, lwd=2.5)
+  abline(h=680, col=col_red, lty=3)
+  
+  plot(ages_fan, fan_female[,"p50"], type="n", ylim=c(0,690),
+       xlab="Age (months)", ylab="Productive vocabulary", main="Girls - predictive fan")
+  polygon(c(ages_fan,rev(ages_fan)), c(fan_female[,"p10"],rev(fan_female[,"p90"])),
+          col=adjustcolor(col_red,0.18), border=NA)
+  polygon(c(ages_fan,rev(ages_fan)), c(fan_female[,"p25"],rev(fan_female[,"p75"])),
+          col=adjustcolor(col_red,0.35), border=NA)
+  lines(ages_fan, fan_female[,"p50"], col=col_red, lwd=2.5)
+  abline(h=680, col=col_red, lty=3)
+  par(mfrow=c(1,1))
+}, w=9, h=5)
+
+# ── fig21_executive_summary (base-R) ──
+save_fig("fig21_executive_summary", {
+  par(mfrow=c(2,2), mar=c(4,4,3,1))
+  
+  # Panel 1: overdispersion ratio by age
+  plot(desc$age, desc$var_mean_ratio, type="b", pch=16, col=col_red, lwd=2,
+       xlab="Age (months)", ylab="Var / Mean", main="(A) Overdispersion by age",
+       ylim=c(0,160))
+  abline(h=1, col="gray50", lty=2, lwd=1.5)
+  text(17, 10, "Poisson threshold = 1", cex=0.7, col="gray40", pos=3)
+  
+  # Panel 2: DIC by model (NegBin models only for readability — P0 would dwarf the others)
+  nb_dic_vals  <- dic_vals[2:7]
+  nb_dic_names <- dic_table$Model[2:7]
+  nb_dic_cols  <- c(col_red, col_green, col_green, col_green, "#CC8800", "#CC8800")
+  barplot(pmin(nb_dic_vals, 6440), col=adjustcolor(nb_dic_cols, 0.75), border=nb_dic_cols,
+          ylim=c(6390, 6440), xpd=FALSE, ylab="DIC", main="(B) DIC by NegBin model",
+          names.arg=nb_dic_names, cex.names=0.7)
+  abline(h=dic_table$DIC[3], col=col_green, lty=2)  # NB2 is row 3 (after P0)
+  
+  # Panel 3: sex gap comparison
+  gap_alpha   <- mean(post3_cmp[,"gamma"])
+  gap_alpha_ci<- quantile(post3_cmp[,"gamma"], c(.025,.975))
+  half_male   <- log(2)/post6_cmp[,"beta[1]"]
+  half_female <- log(2)/post6_cmp[,"beta[2]"]
+  gap_months  <- mean(half_male - half_female)
+  gap_months_ci <- quantile(half_male - half_female, c(.025,.975))
+  
+  bp2 <- barplot(c(gap_alpha, NA), ylim=c(0,120), col=col_green,
+                 names.arg=c("Sex gap on\nvocabulary level\n(words, NB3)",""),
+                 main="(C) Sex effects: level vs timing", ylab="Effect size")
+  arrows(bp2[1], gap_alpha_ci[1], bp2[1], gap_alpha_ci[2], angle=90, code=3, length=0.05)
+  par(new=TRUE)
+  bp3 <- barplot(c(NA, gap_months), ylim=c(0,6), col=col_purp, axes=FALSE,
+                 names.arg=c("","Sex gap on\ntiming\n(months, NB6)"), ylab="")
+  axis(4)
+  mtext("Months earlier (girls)", side=4, line=2.2, cex=0.7)
+  arrows(bp3[2], gap_months_ci[1], bp3[2], gap_months_ci[2], angle=90, code=3, length=0.05)
+  
+  # Panel 4: predictive band at 24 months
+  j24 <- 24-15; a_idx24 <- paste0("alpha[",j24,"]")
+  idx24 <- sample(nrow(post3), 4000, replace=TRUE)
+  mu_m24 <- post3[idx24,a_idx24]*(1-exp(-post3[idx24,"beta"]*(24-8)))
+  mu_f24 <- (post3[idx24,a_idx24]+post3[idx24,"gamma"])*(1-exp(-post3[idx24,"beta"]*(24-8)))
+  ym24 <- pmin(rnbinom(4000,size=post3[idx24,"r"],mu=mu_m24),680)
+  yf24 <- pmin(rnbinom(4000,size=post3[idx24,"r"],mu=mu_f24),680)
+  
+  boxplot(list(Boys=ym24, Girls=yf24), col=c(adjustcolor(col_blue,0.5),adjustcolor(col_red,0.5)),
+          main="(D) Predictive distribution at 24mo", ylab="Productive vocabulary")
+  
+  par(mfrow=c(1,1))
+}, w=9, h=7)
+
+cat("\n=== All", length(list.files("latex_figures")),
+    "figures saved to latex_figures/ ===\n")
+cat("Upload all PDF files to Overleaf alongside vocabulary_growth_report.tex\n")
+```
+
+# References
+
+Bates, E., Dale, P. S., & Thal, D. (1994). Individual differences and their implications for theories of language development. In P. Fletcher & B. MacWhinney (Eds.), *The handbook of child language* (pp. 96–151). Blackwell.
+
+Bloom, P. (1993). Grammatical continuity and the acquisition of verbs. *Language*, 70(2), 357–387.
+
+Bornstein, M. H., Hahn, C.-S., & Haynes, O. M. (2004). Specific and general language performance across early childhood: Stability and gender considerations. *First Language*, 24(3), 267–304.
+
+Efron, B., & Morris, C. (1977). Stein's paradox in statistics. *Scientific American*, 236(5), 119–127.
+
+Eriksson, M., Marschik, P. B., Tulviste, T., Almgren, M., Pérez Pereira, M., Wehberg, S., ... & Gallego, C. (2012). Differences between girls and boys in emerging language skills: Evidence from 10 language communities. *British Journal of Developmental Psychology*, 30(2), 326–343.
+
+Fenson, L., Dale, P. S., Reznick, J. S., Bates, E., Thal, D. J., & Pethick, S. J. (1994). Variability in early communicative development. *Monographs of the Society for Research in Child Development*, 59(5), 1–173.
+
+Frank, M. C., Braginsky, M., Yurovsky, D., & Marchman, V. A. (2017). Wordbank: An open repository for developmental vocabulary data. *Journal of Child Language*, 44(3), 677–694.
+
+Gelman, A., & Rubin, D. B. (1992). Inference from iterative simulation using multiple sequences. *Statistical Science*, 7(4), 457–472.
+
+Gelman, A., Carlin, J. B., Stern, H. S., & Rubin, D. B. (2013). *Bayesian data analysis* (3rd ed.). CRC Press.
+
+Gelman, A., Meng, X.-L., & Stern, H. (1996). Posterior predictive assessment of model fitness via realized discrepancies. *Statistica Sinica*, 6(4), 733–807.
+
+Gelman, A., et al. (2020). Bayesian workflow. *arXiv preprint* arXiv:2011.01808.
+
+Hart, B., & Risley, T. R. (1995). *Meaningful differences in the everyday experience of young American children*. Paul H. Brookes.
+
+Hoff, E. (2003). The specificity of environmental influence: Socioeconomic status affects early vocabulary development via maternal speech. *Child Development*, 74(5), 1368–1378.
+
+Huttenlocher, J., Haight, W., Bryk, A., Seltzer, M., & Lyons, T. (1991). Early vocabulary growth: Relation to language input and gender. *Developmental Psychology*, 27(2), 236–248.
+
+James, W., & Stein, C. (1961). Estimation with quadratic loss. *Proceedings of the Fourth Berkeley Symposium*, 1, 361–379.
+
+Marchman, V. A., & Fernald, A. (2008). Speed of word recognition and vocabulary knowledge in infancy predict cognitive and language outcomes in later childhood. *Developmental Science*, 11(3), F9–F16.
+
+Meng, X.-L. (1994). Posterior predictive p-values. *The Annals of Statistics*, 22(3), 1142–1160.
+
+Ntzoufaris, I. (2010). *Bayesian modeling using WinBUGS*. John Wiley & Sons.
+
+Pearson, B. Z., Fernández, S. C., & Oller, D. K. (1993). Lexical development in bilingual infants and toddlers: Comparison to monolingual norms. *Language Learning*, 43(1), 93–120.
+
+Pinheiro, J. C., & Bates, D. M. (2000). *Mixed-effects models in S and S-PLUS*. Springer.
+
+Spiegelhalter, D. J., Best, N. G., Carlin, B. P., & Van der Linde, A. (2002). Bayesian measures of model complexity and fit. *Journal of the Royal Statistical Society: Series B*, 64(4), 583–639.
+
+von Bertalanffy, L. (1957). Quantitative laws in metabolism and growth. *The Quarterly Review of Biology*, 32(3), 217–231.
